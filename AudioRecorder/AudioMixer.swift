@@ -106,7 +106,16 @@ enum AudioMixer {
             AVNumberOfChannelsKey: canonicalFormat.channelCount,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
         ]
-        let outputFile = try AVAudioFile(forWriting: outputURL, settings: aacSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
-        try outputFile.write(from: mixed)
+        let outputFile: AVAudioFile
+        do {
+            outputFile = try AVAudioFile(forWriting: outputURL, settings: aacSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        } catch {
+            throw "Failed to create AAC output file at \(outputURL.lastPathComponent): \(error.localizedDescription)"
+        }
+        do {
+            try outputFile.write(from: mixed)
+        } catch {
+            throw "Failed to write mixed audio to \(outputURL.lastPathComponent): \(error.localizedDescription)"
+        }
     }
 }
