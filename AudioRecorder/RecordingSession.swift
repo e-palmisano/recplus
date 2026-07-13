@@ -3,13 +3,15 @@ import Combine
 import CoreAudio
 
 /// Coordinates the system-audio and microphone recorders as a single recording
-/// session, writing both to separate files in a timestamped session folder.
+/// session. Each recorder writes to its own temporary `.caf` file; once
+/// recording stops, the two files are mixed down into a single AAC file and
+/// the temporaries are deleted.
 @MainActor
 final class RecordingSession: ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var errorMessage: String?
-    @Published private(set) var lastSessionFolder: URL?
+    @Published private(set) var lastRecordingURL: URL?
     @Published var availableMics: [MicDevice] = []
     @Published var selectedMicID: AudioObjectID?
 
@@ -17,6 +19,12 @@ final class RecordingSession: ObservableObject {
     private let micRecorder = MicRecorder()
     private var timer: Timer?
     private var startedAt: Date?
+
+    private var currentSystemCafURL: URL?
+    private var currentMicCafURL: URL?
+    private var currentOutputURL: URL?
+    private var systemStartedAt: Date?
+    private var micStartedAt: Date?
 
     init() {
         refreshMics()
@@ -38,15 +46,28 @@ final class RecordingSession: ObservableObject {
 
         errorMessage = nil
 
-        let sessionFolder = Self.makeSessionFolder()
+        let sessionsDir = Self.sessionsDirectory()
+        let baseName = RecordingFormat.sessionFolderName(for: Date())
+        let systemURL = sessionsDir.appendingPathComponent("\(baseName) system.caf")
+        let micURL = sessionsDir.appendingPathComponent("\(baseName) microphone.caf")
+        let outputURL = sessionsDir.appendingPathComponent("\(baseName).m4a")
+
         do {
-            try FileManager.default.createDirectory(at: sessionFolder, withIntermediateDirectories: true)
-            try systemRecorder.start(to: sessionFolder.appendingPathComponent("system.caf"))
+            try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
+            try systemRecorder.start(to: systemURL)
+            let systemStartedAt = Date()
             // Creating the aggregate device above needs a run loop turn to settle in
             // CoreAudio's HAL before another engine can start, otherwise AVAudioEngine.start()
             // deadlocks on the HAL's internal device-list mutex.
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-            try micRecorder.start(to: sessionFolder.appendingPathComponent("microphone.caf"), deviceID: micID)
+            try micRecorder.start(to: micURL, deviceID: micID)
+            let micStartedAt = Date()
+
+            self.currentSystemCafURL = systemURL
+            self.currentMicCafURL = micURL
+            self.currentOutputURL = outputURL
+            self.systemStartedAt = systemStartedAt
+            self.micStartedAt = micStartedAt
         } catch {
             errorMessage = error.localizedDescription
             systemRecorder.stop()
@@ -54,7 +75,6 @@ final class RecordingSession: ObservableObject {
             return
         }
 
-        lastSessionFolder = sessionFolder
         startedAt = Date()
         elapsedSeconds = 0
         isRecording = true
@@ -74,13 +94,35 @@ final class RecordingSession: ObservableObject {
         timer?.invalidate()
         timer = nil
         isRecording = false
+        lastRecordingURL = nil
+
+        guard let systemURL = currentSystemCafURL,
+              let micURL = currentMicCafURL,
+              let outputURL = currentOutputURL,
+              let systemStartedAt,
+              let micStartedAt else { return }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try AudioMixer.mix(
+                    systemURL: systemURL,
+                    micURL: micURL,
+                    systemStartedAt: systemStartedAt,
+                    micStartedAt: micStartedAt,
+                    outputURL: outputURL
+                )
+                try FileManager.default.removeItem(at: systemURL)
+                try FileManager.default.removeItem(at: micURL)
+                await MainActor.run { self?.lastRecordingURL = outputURL }
+            } catch {
+                await MainActor.run { self?.errorMessage = error.localizedDescription }
+            }
+        }
     }
 
-    private static func makeSessionFolder() -> URL {
+    private static func sessionsDirectory() -> URL {
         let base = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
-        return base
-            .appendingPathComponent("AudioRecorder Sessions", isDirectory: true)
-            .appendingPathComponent(RecordingFormat.sessionFolderName(for: Date()), isDirectory: true)
+        return base.appendingPathComponent("AudioRecorder Sessions", isDirectory: true)
     }
 }

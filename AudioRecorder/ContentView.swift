@@ -35,9 +35,9 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
             }
 
-            if let folder = session.lastSessionFolder, !session.isRecording {
+            if let url = session.lastRecordingURL, !session.isRecording {
                 Button("Show Last Recording in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([folder])
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
                 }
                 .buttonStyle(.link)
             }
