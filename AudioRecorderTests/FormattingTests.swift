@@ -24,4 +24,10 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(name, "2026-07-13 14-05-09")
         XCTAssertFalse(name.contains(":"), "colons are invalid in macOS filenames")
     }
+
+    func testTranscriptTimestampFormatsMinutesSeconds() {
+        XCTAssertEqual(RecordingFormat.transcriptTimestamp(0), "00:00")
+        XCTAssertEqual(RecordingFormat.transcriptTimestamp(65), "01:05")
+        XCTAssertEqual(RecordingFormat.transcriptTimestamp(3725), "62:05")
+    }
 }
