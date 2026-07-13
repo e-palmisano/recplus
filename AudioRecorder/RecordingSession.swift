@@ -42,6 +42,10 @@ final class RecordingSession: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: sessionFolder, withIntermediateDirectories: true)
             try systemRecorder.start(to: sessionFolder.appendingPathComponent("system.caf"))
+            // Creating the aggregate device above needs a run loop turn to settle in
+            // CoreAudio's HAL before another engine can start, otherwise AVAudioEngine.start()
+            // deadlocks on the HAL's internal device-list mutex.
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
             try micRecorder.start(to: sessionFolder.appendingPathComponent("microphone.caf"), deviceID: micID)
         } catch {
             errorMessage = error.localizedDescription
