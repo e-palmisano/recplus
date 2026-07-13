@@ -14,6 +14,7 @@
 		380C6D3C0BB614373860960B /* SpeechSegmenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B3060EA936F72B0DE43BD06 /* SpeechSegmenter.swift */; };
 		3EF9076D5A580773DFB4D065 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9B7BB28C2B9F080AA238CCA /* ContentView.swift */; };
 		4C7515C74D6781F9D9319BC0 /* RecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FD2F9F1864C0F74C5CA82F2 /* RecordingSession.swift */; };
+		6EB5C9454B51523237870A2F /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 47E8A9C7DC12D28F5AB32158 /* WhisperKit */; };
 		8399458C0BECBE98AD79CB1D /* AudioRecorderApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C88D83C89E65D3C0940324E4 /* AudioRecorderApp.swift */; };
 		98AD3D0DC849E1D507CF9A55 /* SystemAudioTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D5024D26C9F3DE33CA9B67 /* SystemAudioTap.swift */; };
 		AF84DE5B47E43C23DC791A93 /* CoreAudioSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2124D37D8AC2714D2CCB59D5 /* CoreAudioSupport.swift */; };
@@ -55,6 +56,17 @@
 		F901BD8EA3ED4142A46B1B13 /* MicRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicRecorder.swift; sourceTree = "<group>"; };
 		FBEB3421DEB32F4982C06199 /* FormattingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormattingTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4D456151038DB93428092E61 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6EB5C9454B51523237870A2F /* WhisperKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		44B13B79363697BFCFFAC9B4 /* AudioRecorderTests */ = {
@@ -132,6 +144,7 @@
 			buildConfigurationList = 73F9F46253D355F3615532D4 /* Build configuration list for PBXNativeTarget "AudioRecorder" */;
 			buildPhases = (
 				F318F742EC1A5D453496C805 /* Sources */,
+				4D456151038DB93428092E61 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -139,6 +152,7 @@
 			);
 			name = AudioRecorder;
 			packageProductDependencies = (
+				47E8A9C7DC12D28F5AB32158 /* WhisperKit */,
 			);
 			productName = AudioRecorder;
 			productReference = 7579672F340BE67BB8127F55 /* AudioRecorder.app */;
@@ -167,6 +181,9 @@
 			);
 			mainGroup = 55443597454DEA3B89F54FA7;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E41E38532DEC9A4C6BCB4C87 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 64561CC831A997D97187E01F /* Products */;
 			projectDirPath = "";
@@ -451,6 +468,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E41E38532DEC9A4C6BCB4C87 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/argmax-oss-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		47E8A9C7DC12D28F5AB32158 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E41E38532DEC9A4C6BCB4C87 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
+			productName = WhisperKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A4C3CCB3F64B0A347D6CB594 /* Project object */;
 }
