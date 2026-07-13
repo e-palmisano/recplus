@@ -88,9 +88,10 @@ private struct TranscriptView: View {
             }
             .background(.quaternary.opacity(0.3))
             .clipShape(RoundedRectangle(cornerRadius: 8))
-            .onChange(of: lines.count) { _, _ in
+            .onChange(of: lines.count) { _, newCount in
+                guard newCount > 0 else { return }
                 if pendingText.isEmpty {
-                    proxy.scrollTo(lines.count - 1, anchor: .bottom)
+                    proxy.scrollTo(newCount - 1, anchor: .bottom)
                 } else {
                     proxy.scrollTo("pending", anchor: .bottom)
                 }

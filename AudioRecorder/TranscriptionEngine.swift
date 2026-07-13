@@ -9,11 +9,12 @@ import WhisperKit
 /// plain class fed from background audio threads — `RecordingSession` (the
 /// `@MainActor` `ObservableObject` the UI actually observes) owns the
 /// published state and just forwards these callbacks into it.
-// @unchecked Sendable: engine state is only ever touched by one thread at a
-// time in practice (the loop task, or the caller of ingest()/stop() — mic and
-// system callbacks funnel through the locked accumulators below), matching
-// the audio-thread-crossing design already used by RecordingSession's
-// `nonisolated(unsafe)` reference to this class.
+// @unchecked Sendable: all mutable state below (not just the accumulators)
+// is only ever touched while holding `bufferLock`, including the fields
+// `stop()` mutates — `stop()` can run on the caller's thread concurrently
+// with the loop task's `tick()`, and without the lock that's an unsynchronized
+// cross-thread mutation of `Array`/`String` storage, which is undefined
+// behavior in Swift (can crash), not just a logic race.
 final class TranscriptionEngine: @unchecked Sendable {
     private static let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
     private static let inferenceInterval: TimeInterval = 1.0
@@ -57,12 +58,14 @@ final class TranscriptionEngine: @unchecked Sendable {
     /// the model — a cache hit (already downloaded) reports completion near-
     /// instantly since `WhisperKit.download` checks local files first.
     func start(onDownloadProgress: @escaping @Sendable (Double) -> Void) {
-        rollingSamples = []
-        systemAccumulator = []
-        micAccumulator = []
-        silentSeconds = 0
-        pendingText = ""
-        finalizedLines = []
+        bufferLock.withLock {
+            rollingSamples = []
+            systemAccumulator = []
+            micAccumulator = []
+            silentSeconds = 0
+            pendingText = ""
+            finalizedLines = []
+        }
         startedAt = Date()
 
         loopTask = Task {
@@ -71,10 +74,12 @@ final class TranscriptionEngine: @unchecked Sendable {
                     onDownloadProgress(progress.fractionCompleted)
                 }
                 let kit = try await WhisperKit(WhisperKitConfig(model: Self.modelVariant, modelFolder: modelFolder.path, download: false))
-                self.whisperKit = kit
+                bufferLock.withLock { self.whisperKit = kit }
                 await self.runLoop()
             } catch {
-                // Transcription unavailable (download/load failure) — recording continues audio-only.
+                // Transcription unavailable (download/load failure) — recording continues
+                // audio-only. Report completion so the UI doesn't show a stuck progress bar.
+                onDownloadProgress(1.0)
             }
         }
     }
@@ -112,23 +117,34 @@ final class TranscriptionEngine: @unchecked Sendable {
         }
 
         guard !chunk.isEmpty else { return }
-        rollingSamples.append(contentsOf: chunk)
 
-        if SpeechSegmenter.isSilent(chunk, threshold: Self.silenceThreshold) {
-            silentSeconds += Self.inferenceInterval
-        } else {
-            silentSeconds = 0
+        // Snapshot everything `transcribe()` needs into locals before the
+        // `await` below — the lock must not be held across a suspension
+        // point (that would block `stop()`, possibly for the full duration
+        // of an inference pass, freezing the UI it's called from).
+        let (samplesToTranscribe, kit) = bufferLock.withLock { () -> ([Float], WhisperKit?) in
+            rollingSamples.append(contentsOf: chunk)
+            if SpeechSegmenter.isSilent(chunk, threshold: Self.silenceThreshold) {
+                silentSeconds += Self.inferenceInterval
+            } else {
+                silentSeconds = 0
+            }
+            return (rollingSamples, whisperKit)
         }
 
-        guard let whisperKit else { return }
-        let results = (try? await whisperKit.transcribe(audioArray: rollingSamples, decodeOptions: DecodingOptions(language: "it"))) ?? []
+        guard let kit else { return }
+        let results = (try? await kit.transcribe(audioArray: samplesToTranscribe, decodeOptions: DecodingOptions(language: "it"))) ?? []
         let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let silentChunkCount = Int(silentSeconds / Self.inferenceInterval)
-        if SpeechSegmenter.shouldFinalizeSegment(silentChunkCount: silentChunkCount, chunkDuration: Self.inferenceInterval, requiredSilenceDuration: Self.requiredSilenceDuration) {
+        let shouldFinalize = bufferLock.withLock {
+            let silentChunkCount = Int(silentSeconds / Self.inferenceInterval)
+            return SpeechSegmenter.shouldFinalizeSegment(silentChunkCount: silentChunkCount, chunkDuration: Self.inferenceInterval, requiredSilenceDuration: Self.requiredSilenceDuration)
+        }
+
+        if shouldFinalize {
             finalizeCurrentSegment(text: text)
         } else {
-            pendingText = text
+            bufferLock.withLock { pendingText = text }
             onPendingTextChanged(text)
         }
     }
@@ -137,13 +153,15 @@ final class TranscriptionEngine: @unchecked Sendable {
         if !text.isEmpty {
             let offset = Date().timeIntervalSince(startedAt ?? Date())
             let line = TranscriptLine(offset: offset, text: text)
-            finalizedLines.append(line)
+            bufferLock.withLock { finalizedLines.append(line) }
             onLineFinalized(line)
         }
-        pendingText = ""
+        bufferLock.withLock {
+            pendingText = ""
+            rollingSamples = []
+            silentSeconds = 0
+        }
         onPendingTextChanged("")
-        rollingSamples = []
-        silentSeconds = 0
     }
 
     /// Cancels the inference loop, finalizes any still-pending text (rather
@@ -157,10 +175,11 @@ final class TranscriptionEngine: @unchecked Sendable {
     func stop() -> [TranscriptLine] {
         loopTask?.cancel()
         loopTask = nil
-        if !pendingText.isEmpty {
-            finalizeCurrentSegment(text: pendingText)
+        let stillPending = bufferLock.withLock { pendingText }
+        if !stillPending.isEmpty {
+            finalizeCurrentSegment(text: stillPending)
         }
-        whisperKit = nil
-        return finalizedLines
+        bufferLock.withLock { whisperKit = nil }
+        return bufferLock.withLock { finalizedLines }
     }
 }
