@@ -54,14 +54,16 @@ final class RecordingSession: ObservableObject {
 
         do {
             try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
-            try systemRecorder.start(to: systemURL)
-            let systemStartedAt = Date()
-            // Creating the aggregate device above needs a run loop turn to settle in
-            // CoreAudio's HAL before another engine can start, otherwise AVAudioEngine.start()
-            // deadlocks on the HAL's internal device-list mutex.
-            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            // Mic starts first: it doesn't create a CoreAudio aggregate device, so it
+            // can't race the system tap's aggregate-device background rebuild for the
+            // HAL's internal device-list mutex. Starting the tap (which does create one)
+            // second, after a run loop turn to let the mic's engine settle, avoids the
+            // deadlock we hit when the order was reversed.
             try micRecorder.start(to: micURL, deviceID: micID)
             let micStartedAt = Date()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            try systemRecorder.start(to: systemURL)
+            let systemStartedAt = Date()
 
             self.currentSystemCafURL = systemURL
             self.currentMicCafURL = micURL
