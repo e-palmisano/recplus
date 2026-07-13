@@ -5,6 +5,9 @@ import AVFoundation
 /// a single AAC (.m4a) file, aligning them by their real wall-clock start times
 /// rather than assuming any fixed gap between the two recorders starting.
 enum AudioMixer {
+    private static let canonicalFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+    private static let headroom: Float = 0.9
+
     /// How many leading silent frames each stream needs so both start at the same
     /// wall-clock instant. Exactly one of the two returned values is always 0.
     static func offsetFrames(systemStartedAt: Date, micStartedAt: Date, sampleRate: Double) -> (systemLead: Int, micLead: Int) {
@@ -86,5 +89,24 @@ enum AudioMixer {
         }
 
         return outputBuffer
+    }
+
+    /// Mixes `systemURL` and `micURL` into a single AAC file at `outputURL`,
+    /// aligned by their real start times so neither track drifts against the other.
+    static func mix(systemURL: URL, micURL: URL, systemStartedAt: Date, micStartedAt: Date, outputURL: URL) throws {
+        let systemBuffer = try resampledBuffer(fileURL: systemURL, targetFormat: canonicalFormat)
+        let micBuffer = try resampledBuffer(fileURL: micURL, targetFormat: canonicalFormat)
+
+        let (systemLead, micLead) = offsetFrames(systemStartedAt: systemStartedAt, micStartedAt: micStartedAt, sampleRate: canonicalFormat.sampleRate)
+        let mixed = mixedBuffer(system: systemBuffer, systemLeadFrames: systemLead, mic: micBuffer, micLeadFrames: micLead, headroom: headroom)
+
+        let aacSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: canonicalFormat.sampleRate,
+            AVNumberOfChannelsKey: canonicalFormat.channelCount,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ]
+        let outputFile = try AVAudioFile(forWriting: outputURL, settings: aacSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        try outputFile.write(from: mixed)
     }
 }

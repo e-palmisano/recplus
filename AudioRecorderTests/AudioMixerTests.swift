@@ -98,4 +98,31 @@ final class AudioMixerTests: XCTestCase {
         let midIndex = Int(result.frameLength) / 2
         XCTAssertEqual(result.floatChannelData![0][midIndex], 0.5, accuracy: 0.05)
     }
+
+    func testMixWritesAlignedAacFile() throws {
+        let systemURL = try writeTestCaf(sampleRate: 48_000, channels: 2, seconds: 0.2, amplitude: 0.3)
+        let micURL = try writeTestCaf(sampleRate: 44_100, channels: 1, seconds: 0.2, amplitude: 0.3)
+        defer {
+            try? FileManager.default.removeItem(at: systemURL)
+            try? FileManager.default.removeItem(at: micURL)
+        }
+
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+
+        let systemStartedAt = Date(timeIntervalSince1970: 1000)
+        let micStartedAt = Date(timeIntervalSince1970: 1000.05) // mic starts 50ms later
+
+        try AudioMixer.mix(systemURL: systemURL, micURL: micURL, systemStartedAt: systemStartedAt, micStartedAt: micStartedAt, outputURL: outputURL)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+
+        let resultFile = try AVAudioFile(forReading: outputURL)
+        XCTAssertEqual(resultFile.fileFormat.settings[AVFormatIDKey] as? UInt32, kAudioFormatMPEG4AAC)
+
+        // Expect roughly the longer source's 0.2s plus the 50ms mic lead-in gap.
+        let expectedSeconds = 0.25
+        let actualSeconds = Double(resultFile.length) / resultFile.fileFormat.sampleRate
+        XCTAssertEqual(actualSeconds, expectedSeconds, accuracy: 0.02)
+    }
 }
