@@ -22,6 +22,14 @@ struct ContentView: View {
                 .font(.system(.largeTitle, design: .monospaced))
                 .foregroundStyle(session.isRecording ? .red : .secondary)
 
+            if session.isDownloadingModel {
+                ProgressView(value: session.modelDownloadProgress) {
+                    Text("Downloading transcription model…")
+                        .font(.caption)
+                }
+                .frame(maxWidth: 280)
+            }
+
             Button(session.isRecording ? "Stop Recording" : "Start Recording") {
                 session.isRecording ? session.stop() : session.start()
             }
@@ -35,6 +43,12 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
             }
 
+            if session.isRecording {
+                TranscriptView(lines: session.transcriptLines, pendingText: session.pendingTranscriptText)
+                    .frame(minHeight: 200, idealHeight: 280)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
             if let url = session.lastRecordingURL, !session.isRecording {
                 Button("Show Last Recording in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -43,8 +57,48 @@ struct ContentView: View {
             }
         }
         .padding(32)
-        .frame(width: 380, height: 320)
+        .frame(minWidth: 380)
+        .animation(.easeInOut(duration: 0.25), value: session.isRecording)
         .onAppear { session.refreshMics() }
+    }
+}
+
+private struct TranscriptView: View {
+    let lines: [TranscriptLine]
+    let pendingText: String
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                        Text("[\(RecordingFormat.transcriptTimestamp(line.offset))] \(line.text)")
+                            .font(.body)
+                            .id(index)
+                    }
+                    if !pendingText.isEmpty {
+                        Text(pendingText)
+                            .font(.body.italic())
+                            .foregroundStyle(.secondary)
+                            .id("pending")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+            }
+            .background(.quaternary.opacity(0.3))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .onChange(of: lines.count) { _, _ in
+                if pendingText.isEmpty {
+                    proxy.scrollTo(lines.count - 1, anchor: .bottom)
+                } else {
+                    proxy.scrollTo("pending", anchor: .bottom)
+                }
+            }
+            .onChange(of: pendingText) { _, _ in
+                proxy.scrollTo("pending", anchor: .bottom)
+            }
+        }
     }
 }
 
