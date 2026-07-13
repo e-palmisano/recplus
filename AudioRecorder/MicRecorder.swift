@@ -31,6 +31,7 @@ final class MicRecorder {
     private let engine = AVAudioEngine()
     private var file: AVAudioFile?
     private(set) var isRecording = false
+    var onBuffer: ((AVAudioPCMBuffer, AVAudioFormat) -> Void)?
 
     func start(to fileURL: URL, deviceID: AudioObjectID) throws {
         guard !isRecording else { return }
@@ -64,6 +65,7 @@ final class MicRecorder {
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
             guard let self, let file = self.file else { return }
             try? file.write(from: buffer)
+            self.onBuffer?(buffer, format)
         }
 
         engine.prepare()
