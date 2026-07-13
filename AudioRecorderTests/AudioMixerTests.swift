@@ -63,4 +63,39 @@ final class AudioMixerTests: XCTestCase {
 
         XCTAssertEqual(mixed.floatChannelData![0][0], 1.0, accuracy: 0.0001) // 1.8 clamped to 1.0
     }
+
+    private func writeTestCaf(sampleRate: Double, channels: AVAudioChannelCount, seconds: Double, amplitude: Float) throws -> URL {
+        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: channels)!
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".caf")
+        let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+
+        let frameCount = AVAudioFrameCount(seconds * sampleRate)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)!
+        buffer.frameLength = frameCount
+        for channel in 0..<Int(channels) {
+            for i in 0..<Int(frameCount) {
+                buffer.floatChannelData![channel][i] = amplitude
+            }
+        }
+        try file.write(from: buffer)
+        return url
+    }
+
+    func testResampledBufferConvertsSampleRateAndChannelCount() throws {
+        let sourceURL = try writeTestCaf(sampleRate: 8_000, channels: 1, seconds: 0.1, amplitude: 0.5)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let targetFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 2)!
+        let result = try AudioMixer.resampledBuffer(fileURL: sourceURL, targetFormat: targetFormat)
+
+        XCTAssertEqual(result.format.sampleRate, 16_000)
+        XCTAssertEqual(result.format.channelCount, 2)
+        // 0.1s of source resamples to ~1600 frames at 16kHz; generous tolerance
+        // for resampler filter startup/tail.
+        XCTAssertEqual(Int(result.frameLength), 1_600, accuracy: 200)
+
+        // Sample the middle of the buffer, away from resampler edge artifacts.
+        let midIndex = Int(result.frameLength) / 2
+        XCTAssertEqual(result.floatChannelData![0][midIndex], 0.5, accuracy: 0.05)
+    }
 }

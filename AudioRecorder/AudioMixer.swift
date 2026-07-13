@@ -44,4 +44,47 @@ enum AudioMixer {
 
         return output
     }
+
+    /// Reads an entire audio file into memory and resamples it to `targetFormat`.
+    static func resampledBuffer(fileURL: URL, targetFormat: AVAudioFormat) throws -> AVAudioPCMBuffer {
+        let file = try AVAudioFile(forReading: fileURL)
+        let sourceFormat = file.processingFormat
+
+        guard let sourceBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
+            throw "Failed to allocate read buffer for \(fileURL.lastPathComponent)."
+        }
+        try file.read(into: sourceBuffer)
+
+        let ratio = targetFormat.sampleRate / sourceFormat.sampleRate
+        let outputCapacity = AVAudioFrameCount(Double(sourceBuffer.frameLength) * ratio) + 1024
+
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputCapacity) else {
+            throw "Failed to allocate resample buffer for \(fileURL.lastPathComponent)."
+        }
+        guard let converter = AVAudioConverter(from: sourceFormat, to: targetFormat) else {
+            throw "Failed to create audio converter for \(fileURL.lastPathComponent)."
+        }
+
+        var didProvideBuffer = false
+        var outError: NSError?
+        let status = converter.convert(to: outputBuffer, error: &outError) { _, outStatus in
+            if didProvideBuffer {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+
+            outStatus.pointee = .haveData
+            didProvideBuffer = true
+            return sourceBuffer
+        }
+
+        if let error = outError {
+            throw error
+        }
+        guard status == .haveData else {
+            throw "Audio conversion failed with status \(status.rawValue)."
+        }
+
+        return outputBuffer
+    }
 }
