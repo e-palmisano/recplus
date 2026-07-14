@@ -20,8 +20,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.palmi.rec
         PRODUCT_NAME: "Rec+"
+        PRODUCT_MODULE_NAME: AudioRecorder
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "1.0"
         SWIFT_VERSION: "6.0"
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Automatic
@@ -56,3 +57,19 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Rec+.app/Contents/MacOS/Rec+"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  AudioRecorder:
+    build:
+      targets:
+        AudioRecorder: all
+        AudioRecorderTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - AudioRecorderTests
+    archive:
+      config: Release

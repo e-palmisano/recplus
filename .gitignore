@@ -1,9 +1,9 @@
 .DS_Store
-xcuserdata/
-*.xcuserstate
-DerivedData/
-build/
-.serena/
 .opencode/
+.serena/
 .tiller/
+*.xcuserstate
+build/
+DerivedData/
 output/
+xcuserdata/

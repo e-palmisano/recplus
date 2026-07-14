@@ -270,7 +270,7 @@
 				CODE_SIGN_ENTITLEMENTS = AudioRecorder/AudioRecorder.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 1.0;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AudioRecorder/Info.plist;
@@ -280,6 +280,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.palmi.rec;
+				PRODUCT_MODULE_NAME = AudioRecorder;
 				PRODUCT_NAME = "Rec+";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
@@ -293,7 +294,7 @@
 				CODE_SIGN_ENTITLEMENTS = AudioRecorder/AudioRecorder.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 1.0;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AudioRecorder/Info.plist;
@@ -303,6 +304,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.palmi.rec;
+				PRODUCT_MODULE_NAME = AudioRecorder;
 				PRODUCT_NAME = "Rec+";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
@@ -442,7 +444,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.palmi.AudioRecorderTests;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AudioRecorder.app/Contents/MacOS/AudioRecorder";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Rec+.app/Contents/MacOS/Rec+";
 			};
 			name = Release;
 		};
@@ -460,7 +462,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.palmi.AudioRecorderTests;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AudioRecorder.app/Contents/MacOS/AudioRecorder";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Rec+.app/Contents/MacOS/Rec+";
 			};
 			name = Debug;
 		};

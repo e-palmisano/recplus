@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: [self-hosted, macOS, arm64]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version matches tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: Scripts/check-release-version.sh "$TAG_NAME" project.yml
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Unlock login keychain
+        env:
+          MAC_LOGIN_KEYCHAIN_PASSWORD: ${{ secrets.MAC_LOGIN_KEYCHAIN_PASSWORD }}
+        run: security unlock-keychain -p "$MAC_LOGIN_KEYCHAIN_PASSWORD" login.keychain-db
+
+      - name: Run CI gate
+        run: Scripts/ci.sh
+
+      - name: Import signing certificate
+        env:
+          DEVELOPER_ID_CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          security create-keychain -p "$KEYCHAIN_PASSWORD" ci.keychain
+          security set-keychain-settings -lut 21600 ci.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" ci.keychain
+          security list-keychains -d user -s ci.keychain $(security list-keychains -d user | tr -d '"')
+
+          echo "$DEVELOPER_ID_CERTIFICATE_P12" | base64 --decode > cert.p12
+          security import cert.p12 -k ci.keychain -P "$DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" ci.keychain
+          rm -f cert.p12
+
+      - name: Archive and export
+        run: |
+          xcodegen generate
+          xcodebuild archive -project AudioRecorder.xcodeproj -scheme AudioRecorder -archivePath build/RecPlus.xcarchive
+          xcodebuild -exportArchive -archivePath build/RecPlus.xcarchive -exportPath build/export -exportOptionsPlist exportOptions.plist
+
+      - name: Notarize and staple
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: |
+          echo "$ASC_API_KEY_P8" | base64 --decode > AuthKey.p8
+          ditto -c -k --keepParent "build/export/Rec+.app" build/RecPlus.zip
+          xcrun notarytool submit build/RecPlus.zip --key AuthKey.p8 --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER_ID" --wait
+          xcrun stapler staple "build/export/Rec+.app"
+          rm -f AuthKey.p8
+
+      - name: Build DMG
+        id: dmg
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          DMG_PATH="build/RecPlus-${VERSION}.dmg"
+          Scripts/build-dmg.sh "build/export/Rec+.app" "Rec+" "$DMG_PATH"
+          echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: Scripts/generate-changelog.sh "$TAG_NAME" . > changelog.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          DMG_PATH: ${{ steps.dmg.outputs.path }}
+        run: |
+          gh release create "$TAG_NAME" \
+            "$DMG_PATH" \
+            --title "Rec+ $TAG_NAME" \
+            --notes-file changelog.md
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain ci.keychain || true
+          security lock-keychain login.keychain-db || true
+          rm -f cert.p12
+          rm -f AuthKey.p8
