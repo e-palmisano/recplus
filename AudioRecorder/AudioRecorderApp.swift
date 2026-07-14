@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 @main
 struct AudioRecorderApp: App {
@@ -7,6 +8,30 @@ struct AudioRecorderApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(session: session)
+        }
+        .commands {
+            CommandMenu("Recording") {
+                Button(session.isRecording ? "Stop Recording" : "Start Recording") {
+                    session.isRecording ? session.stop() : session.start()
+                }
+                .keyboardShortcut("r")
+
+                Button(session.isPaused ? "Resume" : "Pause") {
+                    session.togglePause()
+                }
+                .keyboardShortcut("p")
+                .disabled(!session.isRecording)
+
+                Divider()
+
+                Button("Show Last Recording in Finder") {
+                    if let url = session.lastRecordingURL {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(session.lastRecordingURL == nil)
+            }
         }
     }
 }

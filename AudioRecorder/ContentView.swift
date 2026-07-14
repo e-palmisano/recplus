@@ -44,6 +44,47 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 400)
+        .toolbar {
+            ToolbarItem {
+                Picker("Microphone", selection: $session.selectedMicID) {
+                    ForEach(session.availableMics) { mic in
+                        Text(mic.name).tag(Optional(mic.id))
+                    }
+                }
+                .disabled(session.isRecording)
+                .help("Input microphone")
+            }
+
+            ToolbarSpacer()
+
+            if session.isRecording {
+                ToolbarItem {
+                    Button {
+                        session.togglePause()
+                    } label: {
+                        Label(
+                            session.isPaused ? "Resume" : "Pause",
+                            systemImage: session.isPaused ? "play.fill" : "pause.fill"
+                        )
+                    }
+                    .help(session.isPaused ? "Resume recording" : "Pause recording")
+                }
+            }
+
+            ToolbarItem {
+                Button {
+                    session.isRecording ? session.stop() : session.start()
+                } label: {
+                    Label(
+                        session.isRecording ? "Stop" : "Record",
+                        systemImage: session.isRecording ? "stop.fill" : "record.circle"
+                    )
+                }
+                .buttonStyle(.glassProminent)
+                .tint(.red)
+                .help(session.isRecording ? "Stop recording" : "Start recording")
+            }
+        }
         .onChange(of: session.isRecording) { _, isRecording in
             if isRecording { selectionID = nil }
         }
