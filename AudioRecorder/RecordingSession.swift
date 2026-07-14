@@ -170,8 +170,6 @@ final class RecordingSession: ObservableObject {
     }
 
     private static func sessionsDirectory() -> URL {
-        let base = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        return base.appendingPathComponent("AudioRecorder Sessions", isDirectory: true)
+        RecordingStore.defaultDirectory
     }
 }
