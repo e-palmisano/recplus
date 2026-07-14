@@ -31,6 +31,7 @@
 		CA19A8473520E3AB11B6CC5B /* TranscriptionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 753388B236A02100FA50A47B /* TranscriptionEngine.swift */; };
 		CD7C25AE575E03D67E7AF90B /* AudioMixerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E7256B1D8250E2E1AE8A0AA /* AudioMixerTests.swift */; };
 		D65B3F672BEAF77DBCAA7543 /* TranscriptWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B25BE6218E176D73C2613262 /* TranscriptWriter.swift */; };
+		E069A18C1C62C4DFC1540C18 /* RecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1358C489F2BD0FB8FD1223F7 /* RecorderView.swift */; };
 		F2EA0732B724B5B82A00AAD1 /* Formatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6544276335F8088C9A798A5E /* Formatting.swift */; };
 		F8C3F6F84F0ACD3AD1DA1990 /* MicRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F901BD8EA3ED4142A46B1B13 /* MicRecorder.swift */; };
 /* End PBXBuildFile section */
@@ -46,6 +47,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		1358C489F2BD0FB8FD1223F7 /* RecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecorderView.swift; sourceTree = "<group>"; };
 		1DC2C9F561B128F06A6B2D20 /* RecordingStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingStoreTests.swift; sourceTree = "<group>"; };
 		2124D37D8AC2714D2CCB59D5 /* CoreAudioSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreAudioSupport.swift; sourceTree = "<group>"; };
 		2601BB4CB249B34E3AA37683 /* RecordingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingStore.swift; sourceTree = "<group>"; };
@@ -127,6 +129,7 @@
 				C997105A4B0829AB1D6F7142 /* LiveResampler.swift */,
 				F901BD8EA3ED4142A46B1B13 /* MicRecorder.swift */,
 				369661284E781AA52C243E67 /* PauseClock.swift */,
+				1358C489F2BD0FB8FD1223F7 /* RecorderView.swift */,
 				6CF082BDA9A5E714A96A119F /* Recording.swift */,
 				3FD2F9F1864C0F74C5CA82F2 /* RecordingSession.swift */,
 				2601BB4CB249B34E3AA37683 /* RecordingStore.swift */,
@@ -252,6 +255,7 @@
 				52076DAC08D86E2B0721C9D5 /* LiveResampler.swift in Sources */,
 				F8C3F6F84F0ACD3AD1DA1990 /* MicRecorder.swift in Sources */,
 				ADA1CAFE7DD4DC3C9B0673A6 /* PauseClock.swift in Sources */,
+				E069A18C1C62C4DFC1540C18 /* RecorderView.swift in Sources */,
 				6B1733C4048B0B03D0CF0BBA /* Recording.swift in Sources */,
 				4C7515C74D6781F9D9319BC0 /* RecordingSession.swift in Sources */,
 				BF51CE785DB8C1C6690617A0 /* RecordingStore.swift in Sources */,

@@ -2,10 +2,11 @@ import SwiftUI
 
 @main
 struct AudioRecorderApp: App {
+    @StateObject private var session = RecordingSession()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(session: session)
         }
-        .windowResizability(.contentSize)
     }
 }
