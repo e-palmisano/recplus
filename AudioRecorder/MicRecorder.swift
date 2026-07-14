@@ -32,6 +32,10 @@ final class MicRecorder {
     private var file: AVAudioFile?
     private(set) var isRecording = false
     var onBuffer: ((AVAudioPCMBuffer, AVAudioFormat) -> Void)?
+    /// While true, tap callbacks drop buffers: nothing is written to the file
+    /// and nothing is forwarded to onBuffer. Set from the main thread; read on
+    /// the audio thread (benign single-Bool race, same pattern as `file`).
+    var isPaused = false
 
     func start(to fileURL: URL, deviceID: AudioObjectID) throws {
         guard !isRecording else { return }
@@ -63,7 +67,7 @@ final class MicRecorder {
         file = audioFile
 
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            guard let self, let file = self.file else { return }
+            guard let self, !self.isPaused, let file = self.file else { return }
             try? file.write(from: buffer)
             self.onBuffer?(buffer, format)
         }
@@ -76,6 +80,7 @@ final class MicRecorder {
     func stop() {
         guard isRecording else { return }
         isRecording = false
+        isPaused = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         file = nil

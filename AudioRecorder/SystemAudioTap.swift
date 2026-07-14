@@ -126,6 +126,8 @@ final class SystemAudioRecorder {
     private var file: AVAudioFile?
     private(set) var isRecording = false
     var onBuffer: ((AVAudioPCMBuffer, AVAudioFormat) -> Void)?
+    /// See MicRecorder.isPaused — same buffer-dropping contract.
+    var isPaused = false
 
     func start(to fileURL: URL) throws {
         guard !isRecording else { return }
@@ -148,7 +150,7 @@ final class SystemAudioRecorder {
         file = audioFile
 
         try tap.run(on: queue) { [weak self] _, inInputData, _, _, _ in
-            guard let self, let file = self.file else { return }
+            guard let self, !self.isPaused, let file = self.file else { return }
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inInputData, deallocator: nil) else { return }
             try? file.write(from: buffer)
             self.onBuffer?(buffer, format)
@@ -160,6 +162,7 @@ final class SystemAudioRecorder {
     func stop() {
         guard isRecording else { return }
         isRecording = false
+        isPaused = false
         file = nil
         tap.invalidate()
     }

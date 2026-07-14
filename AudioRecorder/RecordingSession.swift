@@ -9,6 +9,7 @@ import CoreAudio
 @MainActor
 final class RecordingSession: ObservableObject {
     @Published private(set) var isRecording = false
+    @Published private(set) var isPaused = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastRecordingURL: URL?
@@ -23,6 +24,7 @@ final class RecordingSession: ObservableObject {
     private let micRecorder = MicRecorder()
     private var timer: Timer?
     private var startedAt: Date?
+    private var clock = PauseClock()
 
     private var currentSystemCafURL: URL?
     private var currentMicCafURL: URL?
@@ -111,11 +113,14 @@ final class RecordingSession: ObservableObject {
         startedAt = Date()
         elapsedSeconds = 0
         isRecording = true
+        isPaused = false
+        clock = PauseClock()
+        clock.start()
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, let startedAt = self.startedAt else { return }
-                self.elapsedSeconds = Date().timeIntervalSince(startedAt)
+                guard let self else { return }
+                self.elapsedSeconds = self.clock.elapsed()
             }
         }
 
@@ -130,6 +135,18 @@ final class RecordingSession: ObservableObject {
         })
     }
 
+    func togglePause() {
+        guard isRecording else { return }
+        isPaused.toggle()
+        micRecorder.isPaused = isPaused
+        systemRecorder.isPaused = isPaused
+        if isPaused {
+            clock.pause()
+        } else {
+            clock.start()
+        }
+    }
+
     func stop() {
         guard isRecording else { return }
         systemRecorder.stop()
@@ -138,6 +155,7 @@ final class RecordingSession: ObservableObject {
         timer?.invalidate()
         timer = nil
         isRecording = false
+        isPaused = false
         lastRecordingURL = nil
 
         guard let systemURL = currentSystemCafURL,
