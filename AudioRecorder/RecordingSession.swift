@@ -19,6 +19,8 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var pendingTranscriptText: String = ""
     @Published private(set) var isDownloadingModel = false
     @Published private(set) var modelDownloadProgress: Double = 0
+    @Published private(set) var micLevel: Float = 0
+    @Published private(set) var systemLevel: Float = 0
 
     private let systemRecorder = SystemAudioRecorder()
     private let micRecorder = MicRecorder()
@@ -77,11 +79,27 @@ final class RecordingSession: ObservableObject {
         let outputURL = sessionsDir.appendingPathComponent("\(baseName).m4a")
         let transcriptURL = sessionsDir.appendingPathComponent("\(baseName).txt")
 
+        // Level publishing is time-gated: system-tap buffers can arrive at
+        // 100+ Hz, and a MainActor hop per buffer is wasted work — the meter
+        // only needs ~20 Hz.
+        var lastMicLevelAt = Date.distantPast
+        var lastSystemLevelAt = Date.distantPast
+
         micRecorder.onBuffer = { [weak self] buffer, format in
             self?.transcriptionEngine.ingest(buffer: buffer, format: format, isSystem: false)
+            let now = Date()
+            guard now.timeIntervalSince(lastMicLevelAt) >= 0.05 else { return }
+            lastMicLevelAt = now
+            let level = AudioLevelMeter.rmsLevel(of: buffer)
+            Task { @MainActor in self?.micLevel = level }
         }
         systemRecorder.onBuffer = { [weak self] buffer, format in
             self?.transcriptionEngine.ingest(buffer: buffer, format: format, isSystem: true)
+            let now = Date()
+            guard now.timeIntervalSince(lastSystemLevelAt) >= 0.05 else { return }
+            lastSystemLevelAt = now
+            let level = AudioLevelMeter.rmsLevel(of: buffer)
+            Task { @MainActor in self?.systemLevel = level }
         }
 
         do {
@@ -142,6 +160,8 @@ final class RecordingSession: ObservableObject {
         systemRecorder.isPaused = isPaused
         if isPaused {
             clock.pause()
+            micLevel = 0
+            systemLevel = 0
         } else {
             clock.start()
         }
@@ -156,6 +176,8 @@ final class RecordingSession: ObservableObject {
         timer = nil
         isRecording = false
         isPaused = false
+        micLevel = 0
+        systemLevel = 0
         lastRecordingURL = nil
 
         guard let systemURL = currentSystemCafURL,
