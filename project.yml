@@ -2,7 +2,7 @@ name: AudioRecorder
 options:
   bundleIdPrefix: com.palmi
   deploymentTarget:
-    macOS: "14.4"
+    macOS: "26.0"
 packages:
   whisperkit:
     url: https://github.com/argmaxinc/argmax-oss-swift
@@ -33,9 +33,10 @@ targets:
       properties:
         NSMicrophoneUsageDescription: "Rec+ needs microphone access to record your voice alongside system audio."
         NSAudioCaptureUsageDescription: "Rec+ needs permission to capture system output audio so it can record it while it keeps playing normally."
+        NSSpeechRecognitionUsageDescription: "Rec+ uses on-device speech recognition to transcribe your recordings live."
         LSApplicationCategoryType: public.app-category.productivity
         CFBundleDisplayName: "Rec+"
-        LSMinimumSystemVersion: "14.4"
+        LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: ""
         LSUIElement: false
     entitlements:
