@@ -12,6 +12,12 @@ enum RecordingFormat {
         return formatter.string(from: date)
     }
 
+    static func sessionDate(from name: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        return formatter.date(from: name)
+    }
+
     static func transcriptTimestamp(_ seconds: TimeInterval) -> String {
         let total = Int(seconds)
         return String(format: "%02d:%02d", total / 60, total % 60)

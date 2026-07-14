@@ -30,4 +30,25 @@ final class FormattingTests: XCTestCase {
         XCTAssertEqual(RecordingFormat.transcriptTimestamp(65), "01:05")
         XCTAssertEqual(RecordingFormat.transcriptTimestamp(3725), "62:05")
     }
+
+    func testSessionDateRoundTripsSessionFolderName() {
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 7
+        components.day = 13
+        components.hour = 14
+        components.minute = 5
+        components.second = 9
+        let calendar = Calendar(identifier: .gregorian)
+        let date = calendar.date(from: components)!
+
+        let name = RecordingFormat.sessionFolderName(for: date)
+
+        XCTAssertEqual(RecordingFormat.sessionDate(from: name), date)
+    }
+
+    func testSessionDateRejectsGarbage() {
+        XCTAssertNil(RecordingFormat.sessionDate(from: "not a date"))
+        XCTAssertNil(RecordingFormat.sessionDate(from: ""))
+    }
 }
