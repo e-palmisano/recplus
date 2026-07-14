@@ -162,7 +162,7 @@ git commit -m "feat: add RecordControlState pure derivation with tests"
 
 **Interfaces:**
 - Consumes: `RecordControlState.derive(...)` (Task 1); `RecordingSession` (`@ObservedObject`) — reads `isRecording`, `isPaused`, `selectedMicID`; calls `start()`, `stop()`, `togglePause()`.
-- Produces: `RecordControlCluster` view used by `RecorderView` (Task 4).
+- Produces: `RecordControlCluster` view used by `RecorderView` (Task 3).
 
 - [ ] **Step 1: Implement the view**
 
@@ -245,17 +245,21 @@ git commit -m "feat: add RecordControlCluster glass view"
 
 ---
 
-### Task 3: `TranscriptPanel` placeholder parameter
+### Task 3: TranscriptPanel placeholder + RecorderView restructure
+
+**Why one task:** `TranscriptPanel` gains a required `placeholder` parameter, which breaks its only call site (`RecorderView`). Editing both files in one task keeps every commit green — no red-build HEAD between commits.
 
 **Files:**
 - Modify: `AudioRecorder/TranscriptPanel.swift`
+- Modify: `AudioRecorder/RecorderView.swift`
 
 **Interfaces:**
-- Produces: `TranscriptPanel` gains `var placeholder: AnyView` (stored, no default — callers must supply). Rendered in place of the scroll content when `lines.isEmpty && pendingText.isEmpty`. Existing call sites are updated in Task 4 (the only call site).
+- Produces: `TranscriptPanel(lines:pendingText:placeholder:)` — `placeholder: AnyView`, rendered when `lines.isEmpty && pendingText.isEmpty`. The only caller (`RecorderView`) is updated in this same task.
+- Consumes: `RecordControlCluster(session:)` (Task 2); `RecordingSession` published state (`isRecording`, `isPaused`, `isDownloadingModel`, `modelDownloadProgress`, `transcriptLines`, `pendingTranscriptText`, `errorMessage`, `lastRecordingURL`).
 
-- [ ] **Step 1: Add the placeholder parameter and render branch**
+- [ ] **Step 1: Add the placeholder parameter to TranscriptPanel**
 
-In `AudioRecorder/TranscriptPanel.swift`, replace the `struct TranscriptPanel` declaration and the `ScrollViewReader { … }` block so the file reads:
+In `AudioRecorder/TranscriptPanel.swift`, replace the whole file with:
 
 ```swift
 import SwiftUI
@@ -325,31 +329,7 @@ struct TranscriptPanel: View {
 }
 ```
 
-- [ ] **Step 2: Build — expect a failure at the existing call site**
-
-Run: `Scripts/ci.sh 2>&1 | tail -12`
-Expected: COMPILE ERROR in `RecorderView.swift` — `TranscriptPanel` is missing the new `placeholder` argument. (This is intentional; Task 4 fixes it.) Do not commit yet.
-
-- [ ] **Step 3: Commit (the view is complete; the call site is fixed next)**
-
-```bash
-git add AudioRecorder/TranscriptPanel.swift
-git commit -m "feat: TranscriptPanel accepts a placeholder view when empty"
-```
-
-> Note: The build is intentionally red at HEAD after this commit. Task 4 restores green. Do not run the release workflow or push between here and the end of Task 4.
-
----
-
-### Task 4: `RecorderView` restructure — always-visible panel + cluster overlay
-
-**Files:**
-- Modify: `AudioRecorder/RecorderView.swift`
-
-**Interfaces:**
-- Consumes: `TranscriptPanel(…, placeholder:)` (Task 3), `RecordControlCluster(session:)` (Task 2), `RecordingSession` published state (`isRecording`, `isPaused`, `isDownloadingModel`, `modelDownloadProgress`, `transcriptLines`, `pendingTranscriptText`, `errorMessage`, `lastRecordingURL`).
-
-- [ ] **Step 1: Replace `RecorderView.body`**
+- [ ] **Step 2: Restructure RecorderView — always-visible panel + floating cluster overlay**
 
 Overwrite the whole file `AudioRecorder/RecorderView.swift` with:
 
@@ -454,21 +434,21 @@ struct RecorderView: View {
 }
 ```
 
-- [ ] **Step 2: Build + test (full gate)**
+- [ ] **Step 3: Build + test (full gate)**
 
 Run: `Scripts/ci.sh 2>&1 | tail -8`
-Expected: ends with `CI OK`. The red build from Task 3 is now green; the new `RecorderView` compiles and existing tests pass.
+Expected: ends with `CI OK`. Both files compile together; existing tests pass; the panel + cluster are wired in.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit (single green commit)**
 
 ```bash
-git add AudioRecorder/RecorderView.swift
-git commit -m "feat: always-visible transcript + floating control cluster in RecorderView"
+git add AudioRecorder/TranscriptPanel.swift AudioRecorder/RecorderView.swift
+git commit -m "feat: always-visible transcript + floating control cluster"
 ```
 
 ---
 
-### Task 5: `ContentView` toolbar cleanup
+### Task 4: `ContentView` toolbar cleanup
 
 **Files:**
 - Modify: `AudioRecorder/ContentView.swift` (remove the Pause + Record/Stop `ToolbarItem`s, keep the mic `Picker` and `ToolbarSpacer`)
@@ -507,7 +487,7 @@ git commit -m "refactor: drop duplicate Record/Pause toolbar items"
 
 ---
 
-### Task 6: Integration verification (manual matrix)
+### Task 5: Integration verification (manual matrix)
 
 **Files:** none modified — verification only.
 
@@ -533,7 +513,7 @@ In Xcode: ⌘R to run `Rec+`.
 8. **Minimum window size** — drag window to minimum (640×400); confirm the floating cluster does not overlap the transcript text (bottom inset of 72 should clear it).
 9. **No mic selected** — (temporarily) clear `selectedMicID`; Record is dimmed; pressing it is a no-op (no crash, no error toast — the dim communicates state).
 
-- [ ] **Step 4: If all pass, final commit is already in place from Task 5**
+- [ ] **Step 4: If all pass, final commit is already in place from Task 4**
 
 No further commit. The implementation is complete.
 
@@ -542,14 +522,14 @@ No further commit. The implementation is complete.
 ## Self-Review
 
 **Spec coverage:**
-- §Design 1 (floating cluster, 2 buttons) → Tasks 1, 2, 4.
-- §Design 2 (always-visible transcript + placeholder state table) → Tasks 3, 4 (idle / downloading / listening / live / stopped states all handled: idle & stopped-empty via `transcriptPlaceholder`, downloading via `isDownloadingModel` branch, listening via `isRecording` branch, live via existing panel).
-- §Design 3 (toolbar cleanup, keep picker + menu commands) → Task 5. Menu commands live in `AudioRecorderApp.swift` and are untouched (confirmed in Global Constraints).
-- §Design 4 (meters, in-recording, compacted above transcript) → Task 4 keeps the existing meter block, now directly above the always-visible panel.
-- §Testing (ci.sh + manual matrix) → Tasks 1–5 gate on ci.sh; Task 6 is the manual matrix.
+- §Design 1 (floating cluster, 2 buttons) → Tasks 1, 2, 3.
+- §Design 2 (always-visible transcript + placeholder state table) → Task 3 (idle / downloading / listening / live / stopped states all handled: idle & stopped-empty via `transcriptPlaceholder`, downloading via `isDownloadingModel` branch, listening via `isRecording` branch, live via existing panel).
+- §Design 3 (toolbar cleanup, keep picker + menu commands) → Task 4. Menu commands live in `AudioRecorderApp.swift` and are untouched (confirmed in Global Constraints).
+- §Design 4 (meters, in-recording, compacted above transcript) → Task 3 keeps the existing meter block, now directly above the always-visible panel.
+- §Testing (ci.sh + manual matrix) → Tasks 1–4 gate on ci.sh; Task 5 is the manual matrix.
 
 **Placeholder scan:** no TBD/TODO/"handle edge cases" left; every code step contains the actual code.
 
-**Type consistency:** `RecordControlState.derive(isRecording:isPaused:hasMic:)` signature identical in Task 1 (defined) and Task 2 (called). `TranscriptPanel(lines:pendingText:placeholder:)` identical in Task 3 (defined) and Task 4 (called). `RecordControlCluster(session:)` identical in Task 2 (defined) and Task 4 (used).
+**Type consistency:** `RecordControlState.derive(isRecording:isPaused:hasMic:)` signature identical in Task 1 (defined) and Task 2 (called). `TranscriptPanel(lines:pendingText:placeholder:)` is defined and called within Task 3. `RecordControlCluster(session:)` identical in Task 2 (defined) and Task 3 (used).
 
 **Risks carried from spec:** floating-cluster overlap at min window size → checked in matrix row 8 (bottom inset 72; adjust if needed). Removing toolbar buttons → mitigated by menu + keyboard parity, checked in matrix rows 5–6.
