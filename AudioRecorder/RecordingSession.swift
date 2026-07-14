@@ -25,7 +25,6 @@ final class RecordingSession: ObservableObject {
     private let systemRecorder = SystemAudioRecorder()
     private let micRecorder = MicRecorder()
     private var timer: Timer?
-    private var startedAt: Date?
     private var clock = PauseClock()
 
     private var currentSystemCafURL: URL?
@@ -128,7 +127,6 @@ final class RecordingSession: ObservableObject {
             return
         }
 
-        startedAt = Date()
         elapsedSeconds = 0
         isRecording = true
         isPaused = false
