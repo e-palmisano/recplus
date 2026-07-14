@@ -3,12 +3,19 @@ options:
   bundleIdPrefix: com.palmi
   deploymentTarget:
     macOS: "14.4"
+packages:
+  whisperkit:
+    url: https://github.com/argmaxinc/argmax-oss-swift
+    from: "1.0.0"
 targets:
   AudioRecorder:
     type: application
     platform: macOS
     sources:
       - path: AudioRecorder
+    dependencies:
+      - package: whisperkit
+        product: WhisperKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.palmi.rec
@@ -37,6 +44,7 @@ targets:
         com.apple.security.device.audio-input: true
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.assets.music.read-write: true
+        com.apple.security.network.client: true
   AudioRecorderTests:
     type: bundle.unit-test
     platform: macOS

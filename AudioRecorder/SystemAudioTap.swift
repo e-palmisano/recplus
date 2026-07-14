@@ -125,6 +125,7 @@ final class SystemAudioRecorder {
     private let queue = DispatchQueue(label: "com.tiller.AudioRecorder.SystemAudioRecorder", qos: .userInteractive)
     private var file: AVAudioFile?
     private(set) var isRecording = false
+    var onBuffer: ((AVAudioPCMBuffer, AVAudioFormat) -> Void)?
 
     func start(to fileURL: URL) throws {
         guard !isRecording else { return }
@@ -150,6 +151,7 @@ final class SystemAudioRecorder {
             guard let self, let file = self.file else { return }
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inInputData, deallocator: nil) else { return }
             try? file.write(from: buffer)
+            self.onBuffer?(buffer, format)
         }
 
         isRecording = true

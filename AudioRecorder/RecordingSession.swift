@@ -8,12 +8,22 @@ import CoreAudio
 /// the temporaries are deleted.
 @MainActor
 final class RecordingSession: ObservableObject {
+    // WhisperKit.download() always does a network round-trip (ETag check) even
+    // when the model is already cached, so its progress callback can't tell us
+    // "no UI needed" quickly enough to avoid a visible flash. This flag is our
+    // own record of a completed download, set once WhisperKit finishes loading.
+    private static let modelDownloadedKey = "whisperModelDownloaded"
+
     @Published private(set) var isRecording = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastRecordingURL: URL?
     @Published var availableMics: [MicDevice] = []
     @Published var selectedMicID: AudioObjectID?
+    @Published private(set) var transcriptLines: [TranscriptLine] = []
+    @Published private(set) var pendingTranscriptText: String = ""
+    @Published private(set) var isDownloadingModel = false
+    @Published private(set) var modelDownloadProgress: Double = 0
 
     private let systemRecorder = SystemAudioRecorder()
     private let micRecorder = MicRecorder()
@@ -23,8 +33,24 @@ final class RecordingSession: ObservableObject {
     private var currentSystemCafURL: URL?
     private var currentMicCafURL: URL?
     private var currentOutputURL: URL?
+    private var currentTranscriptURL: URL?
     private var systemStartedAt: Date?
     private var micStartedAt: Date?
+
+    // `lazy`: the closures below capture `self`, which isn't yet fully
+    // initialized at the point a plain stored-property initializer would run.
+    // Deferring construction to first access (inside `start()`, well after
+    // `init()` returns) sidesteps that. `TranscriptionEngine` is itself
+    // `@unchecked Sendable` (see its doc comment), so no isolation escape
+    // hatch is needed here.
+    private lazy var transcriptionEngine: TranscriptionEngine = TranscriptionEngine(
+        onLineFinalized: { [weak self] line in
+            Task { @MainActor in self?.transcriptLines.append(line) }
+        },
+        onPendingTextChanged: { [weak self] text in
+            Task { @MainActor in self?.pendingTranscriptText = text }
+        }
+    )
 
     init() {
         refreshMics()
@@ -45,12 +71,22 @@ final class RecordingSession: ObservableObject {
         }
 
         errorMessage = nil
+        transcriptLines = []
+        pendingTranscriptText = ""
 
         let sessionsDir = Self.sessionsDirectory()
         let baseName = RecordingFormat.sessionFolderName(for: Date())
         let systemURL = sessionsDir.appendingPathComponent("\(baseName) system.caf")
         let micURL = sessionsDir.appendingPathComponent("\(baseName) microphone.caf")
         let outputURL = sessionsDir.appendingPathComponent("\(baseName).m4a")
+        let transcriptURL = sessionsDir.appendingPathComponent("\(baseName).txt")
+
+        micRecorder.onBuffer = { [weak self] buffer, format in
+            self?.transcriptionEngine.ingest(buffer: buffer, format: format, isSystem: false)
+        }
+        systemRecorder.onBuffer = { [weak self] buffer, format in
+            self?.transcriptionEngine.ingest(buffer: buffer, format: format, isSystem: true)
+        }
 
         do {
             try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
@@ -68,6 +104,7 @@ final class RecordingSession: ObservableObject {
             self.currentSystemCafURL = systemURL
             self.currentMicCafURL = micURL
             self.currentOutputURL = outputURL
+            self.currentTranscriptURL = transcriptURL
             self.systemStartedAt = systemStartedAt
             self.micStartedAt = micStartedAt
         } catch {
@@ -87,12 +124,26 @@ final class RecordingSession: ObservableObject {
                 self.elapsedSeconds = Date().timeIntervalSince(startedAt)
             }
         }
+
+        let modelAlreadyDownloaded = UserDefaults.standard.bool(forKey: Self.modelDownloadedKey)
+        isDownloadingModel = !modelAlreadyDownloaded
+        modelDownloadProgress = modelAlreadyDownloaded ? 1.0 : 0
+        transcriptionEngine.start(onDownloadProgress: { [weak self] progress in
+            Task { @MainActor in
+                self?.modelDownloadProgress = progress
+                if progress >= 1.0 {
+                    self?.isDownloadingModel = false
+                    UserDefaults.standard.set(true, forKey: Self.modelDownloadedKey)
+                }
+            }
+        })
     }
 
     func stop() {
         guard isRecording else { return }
         systemRecorder.stop()
         micRecorder.stop()
+        let finalLines = transcriptionEngine.stop()
         timer?.invalidate()
         timer = nil
         isRecording = false
@@ -101,6 +152,7 @@ final class RecordingSession: ObservableObject {
         guard let systemURL = currentSystemCafURL,
               let micURL = currentMicCafURL,
               let outputURL = currentOutputURL,
+              let transcriptURL = currentTranscriptURL,
               let systemStartedAt,
               let micStartedAt else { return }
 
@@ -118,6 +170,10 @@ final class RecordingSession: ObservableObject {
                 await MainActor.run { self?.lastRecordingURL = outputURL }
             } catch {
                 await MainActor.run { self?.errorMessage = error.localizedDescription }
+            }
+
+            if !finalLines.isEmpty {
+                try? TranscriptWriter.text(for: finalLines).write(to: transcriptURL, atomically: true, encoding: .utf8)
             }
         }
     }
