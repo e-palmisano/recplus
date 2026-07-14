@@ -1,6 +1,6 @@
 name: AudioRecorder
 options:
-  bundleIdPrefix: com.tiller
+  bundleIdPrefix: com.palmi
   deploymentTarget:
     macOS: "14.4"
 targets:
@@ -11,22 +11,22 @@ targets:
       - path: AudioRecorder
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.tiller.AudioRecorder
-        PRODUCT_NAME: AudioRecorder
+        PRODUCT_BUNDLE_IDENTIFIER: com.palmi.rec
+        PRODUCT_NAME: "Rec+"
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: YES
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: "AppIcon"
     info:
       path: AudioRecorder/Info.plist
       properties:
-        NSMicrophoneUsageDescription: "AudioRecorder needs microphone access to record your voice alongside system audio."
-        NSAudioCaptureUsageDescription: "AudioRecorder needs permission to capture system output audio so it can record it while it keeps playing normally."
+        NSMicrophoneUsageDescription: "Rec+ needs microphone access to record your voice alongside system audio."
+        NSAudioCaptureUsageDescription: "Rec+ needs permission to capture system output audio so it can record it while it keeps playing normally."
         LSApplicationCategoryType: public.app-category.productivity
-        CFBundleDisplayName: AudioRecorder
+        CFBundleDisplayName: "Rec+"
         LSMinimumSystemVersion: "14.4"
         NSHumanReadableCopyright: ""
         LSUIElement: false

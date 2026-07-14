@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>AudioRecorder</string>
+	<string>Rec+</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -27,10 +27,10 @@
 	<key>LSUIElement</key>
 	<false/>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>AudioRecorder needs permission to capture system output audio so it can record it while it keeps playing normally.</string>
+	<string>Rec+ needs permission to capture system output audio so it can record it while it keeps playing normally.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>AudioRecorder needs microphone access to record your voice alongside system audio.</string>
+	<string>Rec+ needs microphone access to record your voice alongside system audio.</string>
 </dict>
 </plist>

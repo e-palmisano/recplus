@@ -4,3 +4,6 @@ xcuserdata/
 DerivedData/
 build/
 .serena/
+.opencode/
+.tiller/
+output/
