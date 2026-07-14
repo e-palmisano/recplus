@@ -8,12 +8,6 @@ import CoreAudio
 /// the temporaries are deleted.
 @MainActor
 final class RecordingSession: ObservableObject {
-    // WhisperKit.download() always does a network round-trip (ETag check) even
-    // when the model is already cached, so its progress callback can't tell us
-    // "no UI needed" quickly enough to avoid a visible flash. This flag is our
-    // own record of a completed download, set once WhisperKit finishes loading.
-    private static let modelDownloadedKey = "whisperModelDownloaded"
-
     @Published private(set) var isRecording = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var errorMessage: String?
@@ -125,16 +119,13 @@ final class RecordingSession: ObservableObject {
             }
         }
 
-        let modelAlreadyDownloaded = UserDefaults.standard.bool(forKey: Self.modelDownloadedKey)
-        isDownloadingModel = !modelAlreadyDownloaded
-        modelDownloadProgress = modelAlreadyDownloaded ? 1.0 : 0
+        isDownloadingModel = false
+        modelDownloadProgress = 0
         transcriptionEngine.start(onDownloadProgress: { [weak self] progress in
             Task { @MainActor in
-                self?.modelDownloadProgress = progress
-                if progress >= 1.0 {
-                    self?.isDownloadingModel = false
-                    UserDefaults.standard.set(true, forKey: Self.modelDownloadedKey)
-                }
+                guard let self else { return }
+                self.modelDownloadProgress = progress
+                self.isDownloadingModel = progress < 1.0
             }
         })
     }
