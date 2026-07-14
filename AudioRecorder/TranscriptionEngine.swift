@@ -1,26 +1,28 @@
 import Foundation
 import AVFoundation
-import WhisperKit
+import Speech
+
+enum TranscriptionSetupError: Error {
+    case notAvailable
+    case localeNotSupported
+    case noAudioFormat
+}
 
 /// Coordinates live transcription: receives raw audio buffers from both
-/// recorders as they arrive, resamples and mixes them, and runs WhisperKit
-/// on a rolling window with silence-based segment finalization. Reports
-/// results via callbacks rather than `@Published` properties so it can be a
-/// plain class fed from background audio threads — `RecordingSession` (the
-/// `@MainActor` `ObservableObject` the UI actually observes) owns the
-/// published state and just forwards these callbacks into it.
+/// recorders as they arrive, resamples and mixes them, and streams the
+/// result into Apple's on-device SpeechAnalyzer. Reports results via
+/// callbacks rather than `@Published` properties so it can be a plain class
+/// fed from background audio threads — `RecordingSession` (the `@MainActor`
+/// `ObservableObject` the UI actually observes) owns the published state and
+/// just forwards these callbacks into it.
 // @unchecked Sendable: all mutable state below (not just the accumulators)
 // is only ever touched while holding `bufferLock`, including the fields
 // `stop()` mutates — `stop()` can run on the caller's thread concurrently
-// with the loop task's `tick()`, and without the lock that's an unsynchronized
-// cross-thread mutation of `Array`/`String` storage, which is undefined
-// behavior in Swift (can crash), not just a logic race.
+// with the feed task's `mixLoop()`, and without the lock that's an
+// unsynchronized cross-thread mutation of `Array`/`String` storage, which is
+// undefined behavior in Swift (can crash), not just a logic race.
 final class TranscriptionEngine: @unchecked Sendable {
-    private static let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
-    private static let inferenceInterval: TimeInterval = 1.0
-    private static let silenceThreshold: Float = 0.01
-    private static let requiredSilenceDuration: TimeInterval = 0.6
-    private static let modelVariant = "small"
+    private static let mixInterval: TimeInterval = 1.0
 
     private let onLineFinalized: (TranscriptLine) -> Void
     private let onPendingTextChanged: (String) -> Void
@@ -28,57 +30,109 @@ final class TranscriptionEngine: @unchecked Sendable {
     private let bufferLock = NSLock()
     private var systemAccumulator: [Float] = []
     private var micAccumulator: [Float] = []
-
-    private var whisperKit: WhisperKit?
-    private var rollingSamples: [Float] = []
-    private var silentSeconds: TimeInterval = 0
-    private var startedAt: Date?
-    private var loopTask: Task<Void, Never>?
     private var pendingText: String = ""
 
     // Authoritative record of finalized lines, appended synchronously inside
-    // `finalizeCurrentSegment` on whatever thread calls it. `onLineFinalized`
-    // is a fire-and-forget UI notification that hops to `@MainActor`
+    // `finalizeLine` on whatever thread calls it. `onLineFinalized` is a
+    // fire-and-forget UI notification that hops to `@MainActor`
     // asynchronously — it must never be the source of truth read by `stop()`,
     // since a caller reading `RecordingSession.transcriptLines` immediately
     // after `stop()` returns could race ahead of that hop and miss the last
     // line. `finalizedLines` has no such race: it's set before
-    // `finalizeCurrentSegment` returns.
+    // `finalizeLine` returns.
     private var finalizedLines: [TranscriptLine] = []
+
+    private var analyzer: SpeechAnalyzer?
+    private var transcriber: SpeechTranscriber?
+    private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
+    private var targetFormat: AVAudioFormat?
+    private var reservedLocale: Locale?
+    private var startedAt: Date?
+    private var feedTask: Task<Void, Never>?
+    private var resultsTask: Task<Void, Never>?
 
     init(onLineFinalized: @escaping (TranscriptLine) -> Void, onPendingTextChanged: @escaping (String) -> Void) {
         self.onLineFinalized = onLineFinalized
         self.onPendingTextChanged = onPendingTextChanged
     }
 
-    /// Starts the background inference loop. Model download/load happens
-    /// inside the loop's task, so a slow or failing load never blocks
+    /// Starts the background transcription pipeline. Locale/asset resolution
+    /// happens inside the task, so a slow or failing setup never blocks
     /// `start()`'s caller (`RecordingSession.start()`, which must return
-    /// promptly). `onDownloadProgress` reports 0...1 while WhisperKit fetches
-    /// the model — a cache hit (already downloaded) reports completion near-
-    /// instantly since `WhisperKit.download` checks local files first.
+    /// promptly). `onDownloadProgress` reports 0...1 only while a model asset
+    /// is actually being installed — `AssetInventory.assetInstallationRequest`
+    /// returns `nil` when the locale's asset is already installed, so the
+    /// already-cached case reports completion immediately with no visible
+    /// progress UI (unlike WhisperKit, which always did a network round-trip
+    /// even for cached models).
     func start(onDownloadProgress: @escaping @Sendable (Double) -> Void) {
         bufferLock.withLock {
-            rollingSamples = []
             systemAccumulator = []
             micAccumulator = []
-            silentSeconds = 0
             pendingText = ""
             finalizedLines = []
         }
         startedAt = Date()
 
-        loopTask = Task {
+        feedTask = Task {
             do {
-                let modelFolder = try await WhisperKit.download(variant: Self.modelVariant) { progress in
-                    onDownloadProgress(progress.fractionCompleted)
+                guard SpeechTranscriber.isAvailable else { throw TranscriptionSetupError.notAvailable }
+                guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) else {
+                    throw TranscriptionSetupError.localeNotSupported
                 }
-                let kit = try await WhisperKit(WhisperKitConfig(model: Self.modelVariant, modelFolder: modelFolder.path, download: false))
-                bufferLock.withLock { self.whisperKit = kit }
-                await self.runLoop()
+                try await AssetInventory.reserve(locale: locale)
+                reservedLocale = locale
+
+                let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
+                self.transcriber = transcriber
+
+                guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                    throw TranscriptionSetupError.noAudioFormat
+                }
+                targetFormat = format
+
+                let analyzer = SpeechAnalyzer(modules: [transcriber])
+                self.analyzer = analyzer
+                try await analyzer.prepareToAnalyze(in: format, withProgressReadyHandler: nil)
+
+                let installed = await SpeechTranscriber.installedLocales.contains(locale)
+                if !installed {
+                    if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                        let observation = request.progress.observe(\.fractionCompleted) { progress, _ in
+                            onDownloadProgress(progress.fractionCompleted)
+                        }
+                        try await request.downloadAndInstall()
+                        observation.invalidate()
+                    }
+                }
+                onDownloadProgress(1.0)
+
+                let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+                inputContinuation = continuation
+                resultsTask = Task { [weak self] in
+                    guard let results = self?.transcriber?.results else { return }
+                    do {
+                        for try await result in results {
+                            guard let self else { return }
+                            let text = String(result.text.characters)
+                            if result.isFinal {
+                                self.finalizeLine(text: text)
+                            } else {
+                                self.bufferLock.withLock { self.pendingText = text }
+                                self.onPendingTextChanged(text)
+                            }
+                        }
+                    } catch {
+                        // Results stream ended (or errored) — nothing further to consume.
+                    }
+                }
+
+                try await analyzer.start(inputSequence: stream)
+                await self.mixLoop()
             } catch {
-                // Transcription unavailable (download/load failure) — recording continues
-                // audio-only. Report completion so the UI doesn't show a stuck progress bar.
+                // Transcription unavailable (locale/permission/download failure) —
+                // recording continues audio-only. Report completion so the UI
+                // doesn't show a stuck progress bar.
                 onDownloadProgress(1.0)
             }
         }
@@ -88,9 +142,10 @@ final class TranscriptionEngine: @unchecked Sendable {
     /// and system-tap audio callbacks, which run on non-main threads and (for
     /// the system tap) hand over buffers that are only valid synchronously.
     /// Resampling happens immediately, before this function returns; only the
-    /// resulting plain `[Float]` is stored for the background loop to pick up.
+    /// resulting plain `[Float]` is stored for the mix loop to pick up.
     func ingest(buffer: AVAudioPCMBuffer, format: AVAudioFormat, isSystem: Bool) {
-        guard let samples = try? LiveResampler.resampleToMono16k(buffer: buffer, from: format, targetFormat: Self.targetFormat) else { return }
+        guard let target = targetFormat,
+              let samples = try? LiveResampler.resampleToMono16k(buffer: buffer, from: format, targetFormat: target) else { return }
 
         bufferLock.withLock {
             if isSystem {
@@ -101,85 +156,84 @@ final class TranscriptionEngine: @unchecked Sendable {
         }
     }
 
-    private func runLoop() async {
+    private func mixLoop() async {
         while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: UInt64(Self.inferenceInterval * 1_000_000_000))
-            await tick()
-        }
-    }
+            try? await Task.sleep(nanoseconds: UInt64(Self.mixInterval * 1_000_000_000))
+            guard let format = targetFormat else { continue }
 
-    private func tick() async {
-        let chunk = bufferLock.withLock {
-            let chunk = LiveMixer.sum(systemAccumulator, micAccumulator)
-            systemAccumulator = []
-            micAccumulator = []
-            return chunk
-        }
-
-        guard !chunk.isEmpty else { return }
-
-        // Snapshot everything `transcribe()` needs into locals before the
-        // `await` below — the lock must not be held across a suspension
-        // point (that would block `stop()`, possibly for the full duration
-        // of an inference pass, freezing the UI it's called from).
-        let (samplesToTranscribe, kit) = bufferLock.withLock { () -> ([Float], WhisperKit?) in
-            rollingSamples.append(contentsOf: chunk)
-            if SpeechSegmenter.isSilent(chunk, threshold: Self.silenceThreshold) {
-                silentSeconds += Self.inferenceInterval
-            } else {
-                silentSeconds = 0
+            let chunk = bufferLock.withLock { () -> [Float] in
+                let chunk = LiveMixer.sum(systemAccumulator, micAccumulator)
+                systemAccumulator = []
+                micAccumulator = []
+                return chunk
             }
-            return (rollingSamples, whisperKit)
-        }
 
-        guard let kit else { return }
-        let results = (try? await kit.transcribe(audioArray: samplesToTranscribe, decodeOptions: DecodingOptions(language: "it"))) ?? []
-        let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let shouldFinalize = bufferLock.withLock {
-            let silentChunkCount = Int(silentSeconds / Self.inferenceInterval)
-            return SpeechSegmenter.shouldFinalizeSegment(silentChunkCount: silentChunkCount, chunkDuration: Self.inferenceInterval, requiredSilenceDuration: Self.requiredSilenceDuration)
-        }
-
-        if shouldFinalize {
-            finalizeCurrentSegment(text: text)
-        } else {
-            bufferLock.withLock { pendingText = text }
-            onPendingTextChanged(text)
+            guard !chunk.isEmpty, let buffer = Self.makeBuffer(samples: chunk, format: format) else { continue }
+            inputContinuation?.yield(AnalyzerInput(buffer: buffer))
         }
     }
 
-    private func finalizeCurrentSegment(text: String) {
+    private static func makeBuffer(samples: [Float], format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }
+        buffer.frameLength = buffer.frameCapacity
+        guard let channelData = buffer.floatChannelData else { return nil }
+        samples.withUnsafeBufferPointer { pointer in
+            guard let base = pointer.baseAddress else { return }
+            channelData[0].update(from: base, count: samples.count)
+        }
+        return buffer
+    }
+
+    private func finalizeLine(text: String) {
         if !text.isEmpty {
             let offset = Date().timeIntervalSince(startedAt ?? Date())
             let line = TranscriptLine(offset: offset, text: text)
             bufferLock.withLock { finalizedLines.append(line) }
             onLineFinalized(line)
         }
-        bufferLock.withLock {
-            pendingText = ""
-            rollingSamples = []
-            silentSeconds = 0
-        }
+        bufferLock.withLock { pendingText = "" }
         onPendingTextChanged("")
     }
 
-    /// Cancels the inference loop, finalizes any still-pending text (rather
-    /// than dropping it) so a recording stopped mid-sentence doesn't lose
-    /// that last fragment, and returns the complete, authoritative list of
-    /// finalized lines — callers that need the full transcript synchronously
-    /// (writing the `.txt` file) must use this return value, not
-    /// `RecordingSession.transcriptLines`, which can lag behind it (see
-    /// `finalizedLines`'s doc comment above).
+    /// Cancels the mix loop, finalizes any still-pending (volatile) text
+    /// synchronously — same simplification as before: the trailing fragment
+    /// becomes the last line without awaiting one more analysis pass, so a
+    /// recording stopped mid-sentence doesn't lose it but also doesn't block
+    /// this synchronous call. Proper `SpeechAnalyzer` teardown (flushing
+    /// through `finalize(through:)`, releasing the locale reservation) happens
+    /// in a detached task afterward — safe because `start()` always builds a
+    /// fresh `analyzer`/`transcriber` next time, so a slightly delayed
+    /// cleanup can never observe or corrupt the next session's state.
     @discardableResult
     func stop() -> [TranscriptLine] {
-        loopTask?.cancel()
-        loopTask = nil
+        feedTask?.cancel()
+        feedTask = nil
+        inputContinuation?.finish()
+        inputContinuation = nil
+
         let stillPending = bufferLock.withLock { pendingText }
         if !stillPending.isEmpty {
-            finalizeCurrentSegment(text: stillPending)
+            finalizeLine(text: stillPending)
         }
-        bufferLock.withLock { whisperKit = nil }
+
+        let capturedAnalyzer = analyzer
+        let capturedResultsTask = resultsTask
+        let capturedLocale = reservedLocale
+        analyzer = nil
+        transcriber = nil
+        reservedLocale = nil
+        resultsTask = nil
+
+        Task.detached {
+            if let capturedAnalyzer {
+                try? await capturedAnalyzer.finalize(through: nil)
+            }
+            await capturedResultsTask?.value
+            if let capturedLocale {
+                await AssetInventory.release(reservedLocale: capturedLocale)
+            }
+        }
+
         return bufferLock.withLock { finalizedLines }
     }
 }

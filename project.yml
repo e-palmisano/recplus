@@ -3,19 +3,12 @@ options:
   bundleIdPrefix: com.palmi
   deploymentTarget:
     macOS: "26.0"
-packages:
-  whisperkit:
-    url: https://github.com/argmaxinc/argmax-oss-swift
-    from: "1.0.0"
 targets:
   AudioRecorder:
     type: application
     platform: macOS
     sources:
       - path: AudioRecorder
-    dependencies:
-      - package: whisperkit
-        product: WhisperKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.palmi.rec

@@ -4,11 +4,10 @@ enum LiveResamplerError: Error {
     case conversionFailed
 }
 
-/// Resamples one live audio buffer to mono 16kHz Float32 — the format
-/// Whisper models require — returning a plain `[Float]` so the result is safe
-/// to hand off across threads (unlike `AVAudioPCMBuffer`, which for the
-/// system tap wraps memory that's only valid for the duration of its
-/// callback).
+/// Resamples one live audio buffer to the caller-supplied `targetFormat`,
+/// returning a plain `[Float]` so the result is safe to hand off across
+/// threads (unlike `AVAudioPCMBuffer`, which for the system tap wraps memory
+/// that's only valid for the duration of its callback).
 enum LiveResampler {
     static func resampleToMono16k(buffer: AVAudioPCMBuffer, from format: AVAudioFormat, targetFormat: AVAudioFormat) throws -> [Float] {
         guard let converter = AVAudioConverter(from: format, to: targetFormat) else {

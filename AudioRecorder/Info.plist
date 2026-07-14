@@ -23,7 +23,7 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>14.4</string>
+	<string>26.0</string>
 	<key>LSUIElement</key>
 	<false/>
 	<key>NSAudioCaptureUsageDescription</key>
@@ -32,5 +32,7 @@
 	<string></string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Rec+ needs microphone access to record your voice alongside system audio.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Rec+ uses on-device speech recognition to transcribe your recordings live.</string>
 </dict>
 </plist>
