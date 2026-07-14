@@ -2,6 +2,7 @@
 .opencode/
 .serena/
 .tiller/
+docs/superpowers/
 *.xcuserstate
 build/
 DerivedData/
