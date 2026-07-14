@@ -27,9 +27,13 @@
 - 🎙️ **Simultaneous capture** — records the Mac's system output and your microphone as two independent streams, so a stall or dropout in one never corrupts the other
 - 🔊 **Passive system tap** — taps the default output device via Core Audio without rerouting it; whatever's playing keeps playing normally through the speakers
 - 🎚️ **Wall-clock aligned mixdown** — on stop, both streams are mixed into a single AAC (`.m4a`) file, aligned by their real start times (not a fixed assumed gap) so system audio and voice stay in sync
-- 📝 **Live transcription** — on-device Apple `SpeechAnalyzer` transcribes speech in real time as you record, with the transcript shown live in an expanding view and saved to a timestamped `.txt` file alongside the recording
+- 📝 **Live transcription** — on-device Apple `SpeechAnalyzer` transcribes speech in real time as you record, with the transcript shown live in a glass panel, staying on screen after you stop so you can review or copy it
 - 📦 **Model auto-install** — the Speech framework's on-device model installs automatically on first use per language; later recordings skip straight to transcribing, no progress bar in the way
-- 🖥️ **Simple, focused UI** — pick a microphone, hit record, watch the elapsed time, jump straight to the finished file in Finder
+- ⏸️ **Pause/resume** — pause mid-recording without tearing down the audio engines; paused buffers are dropped from both the file and the transcript, so the gap never shows up in either
+- 📊 **Live level meters** — separate mic/system meters confirm both sources are actually being picked up while recording
+- 🗂️ **Recordings history** — a sidebar lists past sessions; pick one to play it back alongside its transcript, or delete it (moves to Trash, transcript included)
+- ⌨️ **Menu commands** — Start/Stop (⌘R), Pause/Resume (⌘P), Show Last Recording in Finder (⇧⌘F)
+- 🖥️ **Liquid Glass UI** — macOS 26 glass materials throughout, built on `NavigationSplitView` and system toolbar chrome
 
 **Deliberately not doing:** audio routing/virtual devices, multi-track export, cloud transcription — Rec+ stays a focused local recorder, not a studio suite.
 
@@ -66,6 +70,8 @@ macOS will prompt for microphone and system-audio-capture permission on first la
 2. While recording, **`TranscriptionEngine`** resamples both streams to the format `SpeechAnalyzer` requires, mixes them, and streams the result into an on-device `SpeechTranscriber` — the framework itself decides when a segment is finalized, so the transcript updates live without waiting for you to stop.
 3. Once you stop, **`AudioMixer`** aligns the two `.caf` files by wall-clock start time (whichever stream started later gets leading silence inserted) and sums them into a single 48kHz stereo buffer with headroom to avoid clipping.
 4. The result is written out as AAC (`.m4a`), and the finalized transcript is written to a matching `.txt` file; the temporary `.caf` files are deleted.
+5. Pausing sets a flag both recorders check on every audio-thread callback — buffers are dropped (no file write, no transcription ingest) rather than stopping the engines, so the mic-first startup ordering that avoids the Core Audio deadlock never has to run twice.
+6. **`RecordingStore`** scans `~/Music/AudioRecorder Sessions/` for `.m4a` files paired with `.txt` transcripts and powers the sidebar history; **`AudioPlayerController`** drives playback of a selected recording.
 
 ---
 
@@ -73,15 +79,23 @@ macOS will prompt for microphone and system-audio-capture permission on first la
 
 | Path | Role |
 |------|------|
-| `AudioRecorder/AudioRecorderApp.swift` | App entry point |
-| `AudioRecorder/ContentView.swift` | Main window UI |
-| `AudioRecorder/RecordingSession.swift` | Coordinates start/stop across recorders and transcription |
+| `AudioRecorder/AudioRecorderApp.swift` | App entry point, `Recording` menu commands |
+| `AudioRecorder/ContentView.swift` | `NavigationSplitView` shell — sidebar history + detail (recorder or playback) |
+| `AudioRecorder/RecorderView.swift` | Live recorder detail: timer, level meters, transcript panel |
+| `AudioRecorder/PlaybackView.swift` | Playback detail: player controls, transcript, delete |
+| `AudioRecorder/TranscriptPanel.swift` | Shared glass transcript component (live + playback), with copy |
+| `AudioRecorder/LevelMeterView.swift` | Glass capsule level meter |
+| `AudioRecorder/RecordingSession.swift` | Coordinates start/stop/pause across recorders and transcription |
+| `AudioRecorder/PauseClock.swift` | Accumulated active-time tracking that excludes paused intervals |
+| `AudioRecorder/AudioLevelMeter.swift` | RMS level computation from PCM buffers |
 | `AudioRecorder/SystemAudioTap.swift` | Core Audio process-tap for system output |
 | `AudioRecorder/MicRecorder.swift` | Microphone capture via AVAudioEngine |
 | `AudioRecorder/AudioMixer.swift` | Wall-clock aligned mixdown to AAC |
 | `AudioRecorder/TranscriptionEngine.swift` | Live `SpeechAnalyzer`/`SpeechTranscriber` transcription pipeline |
 | `AudioRecorder/LiveResampler.swift` / `LiveMixer.swift` | Resampling/mixing feeding the transcription engine |
 | `AudioRecorder/TranscriptWriter.swift` | Transcript `.txt` formatting |
+| `AudioRecorder/Recording.swift` / `RecordingStore.swift` | Recordings-history model and directory scanner |
+| `AudioRecorder/AudioPlayerController.swift` | `AVAudioPlayer` wrapper driving `PlaybackView` |
 | `AudioRecorder/CoreAudioSupport.swift` | Core Audio device helpers |
 | `AudioRecorder/Formatting.swift` | Time/filename formatting helpers |
 
