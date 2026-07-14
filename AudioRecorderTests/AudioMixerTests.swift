@@ -99,6 +99,18 @@ final class AudioMixerTests: XCTestCase {
         XCTAssertEqual(result.floatChannelData![0][midIndex], 0.5, accuracy: 0.05)
     }
 
+    func testResampledBufferHandlesEmptySourceFile() throws {
+        // Reproduces a very short recording where the tap stopped before any
+        // buffer was written to disk, leaving a valid but zero-frame .caf file.
+        let sourceURL = try writeTestCaf(sampleRate: 48_000, channels: 2, seconds: 0, amplitude: 0)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        let targetFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+        let result = try AudioMixer.resampledBuffer(fileURL: sourceURL, targetFormat: targetFormat)
+
+        XCTAssertEqual(result.frameLength, 0)
+    }
+
     func testMixWritesAlignedAacFile() throws {
         let systemURL = try writeTestCaf(sampleRate: 48_000, channels: 2, seconds: 0.2, amplitude: 0.3)
         let micURL = try writeTestCaf(sampleRate: 44_100, channels: 1, seconds: 0.2, amplitude: 0.3)

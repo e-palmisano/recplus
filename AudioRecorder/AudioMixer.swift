@@ -53,6 +53,13 @@ enum AudioMixer {
         let file = try AVAudioFile(forReading: fileURL)
         let sourceFormat = file.processingFormat
 
+        // A recording stopped before its tap delivered a single buffer leaves a
+        // valid but zero-frame .caf file. AVAudioFile.read(into:) requires a
+        // non-zero frameCapacity, so short-circuit with silence instead.
+        guard file.length > 0 else {
+            return AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 0)!
+        }
+
         guard let sourceBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
             throw "Failed to allocate read buffer for \(fileURL.lastPathComponent)."
         }
