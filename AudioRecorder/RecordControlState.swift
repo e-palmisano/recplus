@@ -17,8 +17,11 @@ struct RecordControlState: Equatable, Sendable {
     ///   - isPaused: whether the active recording is paused. Ignored when
     ///     `isRecording` is false (prevents a stale paused flag from
     ///     flipping the idle secondary to `.resume`).
-    ///   - hasMic: whether a microphone is selected — gates Record.
-    static func derive(isRecording: Bool, isPaused: Bool, hasMic: Bool) -> Self {
+    /// Record is always enabled when idle: pressing it with no microphone
+    /// selected surfaces `RecordingSession`'s "No microphone selected."
+    /// error rather than leaving a dead button (matches the pre-restyle
+    /// toolbar behavior).
+    static func derive(isRecording: Bool, isPaused: Bool) -> Self {
         if isRecording {
             return .init(
                 primary: .stop,
@@ -29,7 +32,7 @@ struct RecordControlState: Equatable, Sendable {
         }
         return .init(
             primary: .record,
-            primaryEnabled: hasMic,
+            primaryEnabled: true,
             secondary: .pause,
             secondaryEnabled: false
         )
