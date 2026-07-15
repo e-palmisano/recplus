@@ -20,7 +20,7 @@
 - Il completamento di un download esplicito cattura una `NormalizedSelectionIdentity` prima del lavoro asincrono e programma/pubblica preload solo se l'identità coincide ancora con la selezione normalizzata corrente; un completamento obsoleto non prepara né pubblica risorse.
 - Il marker condiviso del preload in corso viene pulito atomicamente su successo, errore e cancellazione solo se operazione e generazione corrispondono ancora; un completamento obsoleto non può cancellare il marker di un'operazione più recente.
 - I chiamanti deduplicati non conservano né attendono un task fallito o cancellato diventato obsoleto; dopo tale esito una nuova richiesta può partire e `start` continua attraverso il fallback esistente.
-- Un cambio di modello o lingua invalida e cancella il preload precedente, rilascia le risorse precedenti e prepara il nuovo modello una sola volta non appena installato.
+- Un cambio di modello o lingua invalida e cancella il preload precedente e rilascia le risorse precedenti; `invalidateSelection` non avvia mai il preload. Il coordinatore avvia un nuovo preload soltanto dopo aver normalizzato la nuova selezione e verificato che quel modello sia installato; il controllo installato resta obbligatorio anche dentro `TranscriptionEngine.preload`, quindi nessun chiamante può bypassare la regola selected-model-installed-only.
 - Il modello preparato resta residente tra `stop` e `start`; modello e risorse dell'analyzer vengono rilasciati al cambio di selezione e all'uscita dall'app.
 - Un errore di preload è non bloccante e silenzioso; il percorso esistente di `start` continua a preparare o scaricare il modello quando il preload non è disponibile.
 - La suite esistente deve restare invariata e verde; non modificare UI, formato transcript, mixaggio audio o flusso di registrazione oltre all'uso del modello preparato.
@@ -48,6 +48,7 @@ protocol TranscriptionModelClient: Sendable {
     func prepare(locale: Locale) async throws -> PreparedTranscriptionModel
     func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws
     func release(_ model: PreparedTranscriptionModel) async
+    func recordRecordingStart(locale: Locale, preparedIdentity: UUID?) async
 }
 
 final class PreparedTranscriptionModel: @unchecked Sendable {
@@ -112,7 +113,16 @@ func start(preferredLocale: Locale, onDownloadProgress: @escaping @Sendable (Dou
 @discardableResult func stop() -> [TranscriptLine]
 ```
 
-`preload` and `invalidateSelection` return immediately and launch/replace a cancellable task. `start` remains synchronous to its caller and retains the current fallback behavior inside its task. `stop` cancels only recording/feed/results work; it does not release the resident prepared resource.
+`preload` returns immediately and launches or deduplicates a cancellable task.
+`invalidateSelection` is strictly invalidation/release: it returns immediately,
+cancels the old preload, advances generation, releases the old resident resource,
+and never starts a preload. `RecordingSession` owns the subsequent decision: it
+calls `preload` only after normalization and an installed check for the new
+selected locale. `TranscriptionEngine.preload` repeats the installed check, so
+direct engine callers cannot bypass selected-model-installed-only. `start` remains
+synchronous to its caller and retains the current fallback behavior inside its
+task. `stop` cancels only recording/feed/results work; it does not release the
+resident prepared resource.
 
 `downloadModel(for:)` captures `NormalizedSelectionIdentity` before awaiting
 installation and checks it again after successful installation; only a matching
@@ -122,6 +132,220 @@ failure, or cancellation) clears both atomically only when the stored marker
 still equals the completing operation's marker. A duplicate request obtains the
 current task only while that marker is live; it never awaits a task that has
 already failed or been cancelled.
+
+The deterministic test seam is explicit rather than inferred from an untyped
+harness engine. `TranscriptionModelClient` is the engine boundary; the test
+double below exposes an actor-backed `PreloadTestProbe` with event gates and
+identity-aware event records. `RecordingSession` tests observe the same probe
+through the injected model client; there is no engine introspection protocol.
+The gates are continuations, not
+delays: a test advances model availability, preparation completion, installation
+completion, and resource publication by calling named methods.
+
+```swift
+enum PreloadTestEvent: Equatable, Sendable {
+    case normalized(String)
+    case installedCheck(String, Bool)
+    case preloadRequested(String)
+    case prepareStarted(String, UUID)
+    case prepareFinished(String, UUID)
+    case prepareFailed(String, UUID)
+    case resourcePublished(String, UUID)
+    case resourceReleased(String, UUID)
+    case installStarted(String)
+    case installCompleted(String)
+    case recordingStarted(String, UUID?)
+}
+
+actor PreloadTestProbe {
+    private(set) var events: [PreloadTestEvent] = []
+    private var waiters: [(PreloadTestEvent) -> Bool, CheckedContinuation<Void, Never>] = []
+    private var prepareGates: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var installGates: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func record(_ event: PreloadTestEvent) {
+        events.append(event)
+        let ready = waiters.filter { $0.0(event) }.map(\.1)
+        waiters.removeAll { $0.0(event) }
+        ready.forEach { $0.resume() }
+    }
+
+    func waitFor(_ predicate: @escaping (PreloadTestEvent) -> Bool) async {
+        if events.contains(where: predicate) { return }
+        await withCheckedContinuation { continuation in
+            waiters.append((predicate, continuation))
+        }
+    }
+
+    func waitForPrepareRelease(locale: String) async {
+        await withCheckedContinuation { continuation in
+            prepareGates[locale, default: []].append(continuation)
+        }
+    }
+
+    func completePrepare(locale: String) {
+        prepareGates.removeValue(forKey: locale)?.forEach { $0.resume() }
+    }
+
+    func waitForInstallRelease(locale: String) async {
+        await withCheckedContinuation { continuation in
+            installGates[locale, default: []].append(continuation)
+        }
+    }
+
+    func completeInstall(locale: String) {
+        installGates.removeValue(forKey: locale)?.forEach { $0.resume() }
+    }
+
+    func preloadRequestLocales() -> [String] {
+        events.compactMap { if case .preloadRequested(let locale) = $0, !locale.hasPrefix("invalidate:") { return locale }; return nil }
+    }
+
+    func publishedLocales() -> [String] {
+        events.compactMap { if case .resourcePublished(let locale, _) = $0 { return locale }; return nil }
+    }
+
+    func prepareRequestLocales() -> [String] {
+        events.compactMap { if case .prepareStarted(let locale, _) = $0 { return locale }; return nil }
+    }
+}
+
+```
+
+The production fake implementation steps are exact: `isInstalled` records
+`.installedCheck`, `prepare` records `.prepareStarted`, awaits the per-locale
+prepare gate, then records `.prepareFinished` and returns a value with a stable
+UUID; publication records `.resourcePublished`; `release` records
+`.resourceReleased`; `install` records `.installStarted`, awaits the per-locale
+install gate, and records `.installCompleted`. `TranscriptionEngine` uses the
+same client calls and marker checks as production. Tests wait for probe events
+or release gates and use bounded `XCTestExpectation` fulfillment only to fail a
+deadlock; no test sleeps or polls a counter.
+
+The test double has these concrete members used by the pseudocode:
+
+```swift
+struct StubSnapshot: Sendable {
+    let prepareCounts: [String: Int]
+    let recordingStartedLocales: [String]
+}
+
+actor StubTranscriptionModelClient: TranscriptionModelClient {
+    let installed: Set<String>
+    let probe: PreloadTestProbe
+    let ignoredCancellation: Bool
+    let failedLocales: Set<String>
+    var counts: [String: Int] = [:]
+    var recordingStartedLocales: [String] = []
+
+    init(installed: [Locale], probe: PreloadTestProbe = PreloadTestProbe(), ignoreCancellation: Bool = false, failPrepareFor: Set<String> = []) {
+        self.installed = Set(installed.map(\.identifier))
+        self.probe = probe
+        self.ignoredCancellation = ignoreCancellation
+        self.failedLocales = failPrepareFor
+    }
+
+    func normalizedLocale(for preferredLocale: Locale) async -> Locale? {
+        let locale = Locale(identifier: preferredLocale.identifier.replacingOccurrences(of: "_", with: "-"))
+        await probe.record(.normalized(locale.identifier))
+        return locale
+    }
+
+    func isInstalled(locale: Locale) async -> Bool {
+        let result = installed.contains(locale.identifier)
+        await probe.record(.installedCheck(locale.identifier, result))
+        return result
+    }
+
+    func prepare(locale: Locale) async throws -> PreparedTranscriptionModel {
+        let identity = UUID()
+        counts[locale.identifier, default: 0] += 1
+        await probe.record(.prepareStarted(locale.identifier, identity))
+        await probe.waitForPrepareRelease(locale: locale.identifier)
+        if failedLocales.contains(locale.identifier) {
+            await probe.record(.prepareFailed(locale.identifier, identity))
+            throw StubError.prepare
+        }
+        if !ignoredCancellation { try Task.checkCancellation() }
+        await probe.record(.prepareFinished(locale.identifier, identity))
+        return PreparedTranscriptionModel(locale: locale, identity: identity)
+    }
+
+    func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        await probe.record(.installStarted(locale.identifier))
+        await probe.waitForInstallRelease(locale: locale.identifier)
+        onProgress(1.0)
+        await probe.record(.installCompleted(locale.identifier))
+    }
+
+    func release(_ model: PreparedTranscriptionModel) async {
+        await probe.record(.resourceReleased(model.locale.identifier, model.identity))
+    }
+
+    func recordRecordingStart(locale: Locale, preparedIdentity: UUID?) async {
+        recordingStartedLocales.append(locale.identifier)
+        await probe.record(.recordingStarted(locale.identifier, preparedIdentity))
+    }
+
+    func completePrepare(locale: String) async {
+        await probe.completePrepare(locale: locale)
+    }
+
+    func snapshot() -> StubSnapshot {
+        StubSnapshot(prepareCounts: counts, recordingStartedLocales: recordingStartedLocales)
+    }
+}
+
+func waitFor(_ probe: PreloadTestProbe, _ predicate: @escaping (PreloadTestEvent) -> Bool) async throws {
+    let expectation = XCTestExpectation(description: "preload probe event")
+    Task {
+        await probe.waitFor(predicate)
+        expectation.fulfill()
+    }
+    await fulfillment(of: [expectation], timeout: 2)
+}
+```
+
+Tests read `let snapshot = await client.snapshot()` and assert against its
+values. `fulfillment(of:timeout:)` is a bounded XCTest wait for a missing event,
+not a production delay and not a sleep; production behavior and all ordering
+are driven by probe gates.
+
+Coordinator pseudocode uses this fully defined harness shape; there is no
+implicit engine observation surface:
+
+```swift
+struct SessionHarness {
+    let session: RecordingSession
+    let probe: PreloadTestProbe
+    let installer: GatedModelInstaller
+}
+
+func makeSessionHarness(selectedID: String, normalized: String, installed: Bool) -> SessionHarness {
+    let probe = PreloadTestProbe()
+    let installer = GatedModelInstaller(probe: probe, normalized: normalized, installed: installed)
+    let engine = makeEngine(client: installer.client)
+    let session = RecordingSession(transcriptionEngine: engine, localeResolver: installer.localeResolver, modelInstaller: installer)
+    return SessionHarness(session: session, probe: probe, installer: installer)
+}
+
+func makeInjectedSession(engine: TranscriptionEngine, selectedID: String) -> RecordingSession {
+    let resolver = FixedLocaleResolver(identifier: selectedID)
+    let installer = GatedModelInstaller(probe: PreloadTestProbe(), normalized: selectedID, installed: true)
+    return RecordingSession(transcriptionEngine: engine, localeResolver: resolver, modelInstaller: installer)
+}
+```
+
+`GatedModelInstaller` implements `TranscriptionModelInstalling` with the same
+`install` gate and `PreloadTestProbe`; `FixedLocaleResolver` implements
+`TranscriptionLocaleResolving` by returning `Locale(identifier:)`. Its
+`client` is the actor-backed stub. Both types expose only
+`waitForInstallStart(locale:)`, `completeInstall(locale:)`, and
+`snapshot() async -> InstallerSnapshot` (whose `installCount` is an `Int`), all backed by probe events; no coordinator test reads private
+engine state or waits on an untyped harness property. The engine calls
+`recordRecordingStart` after choosing the resident resource or fallback, so
+recording-start assertions observe an explicit protocol event rather than a
+test-only flag or a race-prone immediate property read.
 
 ### Task 1: Add the deterministic preparation seam and lifecycle state
 
@@ -145,7 +369,9 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         let engine = makeEngine(client: client)
 
         engine.preload(preferredLocale: Locale(identifier: "en_US"))
-        try await client.waitForPrepareCount(1)
+        try await waitFor(client.probe) { if case .prepareStarted("en-US", _) = $0 { return true }; return false }
+        await client.completePrepare(locale: "en-US")
+        try await waitFor(client.probe) { if case .resourcePublished("en-US", _) = $0 { return true }; return false }
 
         XCTAssertEqual(client.normalizedLocales, ["en-US"])
         XCTAssertEqual(client.prepareLocales, ["en-US"])
@@ -155,7 +381,7 @@ final class TranscriptionModelPreloadTests: XCTestCase {
 }
 ```
 
-Add test-only helpers in the same new file before running this test: `makeEngine(client:)`, an actor-backed `StubTranscriptionModelClient`, and an async `waitForPrepareCount(_:)` that polls an actor counter with `Task.sleep(nanoseconds: 1_000_000)` and throws `XCTSkip` only if the timeout is exceeded. Do not use real Speech APIs.
+Add test-only helpers in the same new file before running this test: `makeEngine(client:)`, the actor-backed `StubTranscriptionModelClient`, and `waitFor(_:_: )` implemented with the `XCTestExpectation` bridge above. The stub records the exact prepared identity and returns only after its explicit preparation gate is released. Do not use polling, fixed sleeps, or real Speech APIs.
 
 - [ ] **Step 2: Run the focused test to verify the new seam is absent.**
 
@@ -180,6 +406,7 @@ private var activePreparedLocale: Locale?
 
 #if DEBUG
 var preparedLocaleForTesting: Locale? { preparedModel?.locale }
+var inFlightPreloadLocaleForTesting: String? { preloadMarker?.localeIdentifier }
 #endif
 ```
 
@@ -216,21 +443,27 @@ func testPreloadDoesNotPrepareAnUninstalledSelectedLocale() async throws {
     let engine = makeEngine(client: client)
 
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
-    try await client.waitForInstalledCheck()
-    try await Task.sleep(nanoseconds: 50_000_000)
+    try await waitFor(client.probe) { if case .installedCheck("it-IT", false) = $0 { return true }; return false }
 
     XCTAssertTrue(client.prepareLocales.isEmpty)
     XCTAssertNil(engine.preparedLocaleForTesting)
 }
 
 func testEquivalentConcurrentPreloadsShareOnePreparationOperation() async throws {
-    let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")], prepareDelay: 50_000_000)
+    let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
     let engine = makeEngine(client: client)
 
     engine.preload(preferredLocale: Locale(identifier: "en_US"))
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
-    try await client.waitForPrepareCount(1)
-    try await Task.sleep(nanoseconds: 75_000_000)
+    try await client.waitForEvent { event in
+        if case .prepareStarted("en-US", _) = event { return true }
+        return false
+    }
+    await client.completePrepare(locale: "en-US")
+    try await client.waitForEvent { event in
+        if case .resourcePublished("en-US", _) = event { return true }
+        return false
+    }
 
     XCTAssertEqual(client.prepareLocales, ["en-US"])
     XCTAssertEqual(client.prepareCount, 1)
@@ -257,7 +490,6 @@ func testEquivalentRequestAfterFailedPreloadDoesNotAwaitStaleTask() async throws
 func testEquivalentRequestAfterCancelledPreloadDoesNotAwaitStaleTask() async throws {
     let client = StubTranscriptionModelClient(
         installed: [Locale(identifier: "en-US")],
-        prepareDelay: 200_000_000,
         ignoreCancellation: false
     )
     let engine = makeEngine(client: client)
@@ -436,16 +668,16 @@ Test the coordinator with a stub engine/client and assert:
 func testNormalizedLaunchSelectionPreloadsOnlyResolvedInstalledLocale() async throws {
     let harness = makeSessionHarness(selectedID: "en_US", normalized: "en-US", installed: true)
     harness.session.preloadSelectedModelAfterNormalization()
-    try await harness.engine.waitForPreload(locale: "en-US")
-    XCTAssertEqual(harness.engine.preloadRequests, ["en-US"])
+    try await waitFor(harness.probe) { if case .preloadRequested("en-US") = $0 { return true }; return false }
+    XCTAssertEqual(await harness.probe.preloadRequestLocales(), ["en-US"])
 }
 
 func testSuccessfulExplicitDownloadStartsPreloadImmediately() async throws {
     let harness = makeSessionHarness(selectedID: "it-IT", normalized: "it-IT", installed: false)
     harness.session.downloadModel(for: Locale(identifier: "it-IT"))
-    try await harness.engine.waitForDownloadAndPreload()
-    XCTAssertEqual(harness.installer.installCount, 1)
-    XCTAssertEqual(harness.engine.preloadRequests, ["it-IT"])
+    try await waitFor(harness.probe) { if case .resourcePublished("it-IT", _) = $0 { return true }; return false }
+    XCTAssertEqual((await harness.installer.snapshot()).installCount, 1)
+    XCTAssertEqual(await harness.probe.preloadRequestLocales(), ["it-IT"])
 }
 
 func testStaleExplicitDownloadCompletionDoesNotPrepareOrPublishOldSelection() async throws {
@@ -453,19 +685,17 @@ func testStaleExplicitDownloadCompletionDoesNotPrepareOrPublishOldSelection() as
         selectedID: "en-US",
         normalized: "en-US",
         installed: false,
-        installDelay: 200_000_000
     )
 
     harness.session.downloadModel(for: Locale(identifier: "en-US"))
     try await harness.installer.waitForInstallStart(locale: "en-US")
     harness.session.selectTranscriptionLocale(id: "it-IT")
     try await harness.installer.completeInstall(locale: "en-US")
-    try await harness.engine.waitForDownloadCompletion(locale: "en-US")
-    try await Task.sleep(nanoseconds: 50_000_000)
+    try await waitFor(harness.probe) { if case .installCompleted("en-US") = $0 { return true }; return false }
 
-    XCTAssertEqual(harness.engine.preloadRequests, [])
-    XCTAssertEqual(harness.engine.publishedPreparedLocales, [])
-    XCTAssertEqual(harness.engine.prepareRequests, [])
+    XCTAssertEqual(await harness.probe.preloadRequestLocales(), [])
+    XCTAssertEqual(await harness.probe.publishedLocales(), [])
+    XCTAssertEqual(await harness.probe.prepareRequestLocales(), [])
 }
 ```
 
@@ -538,7 +768,7 @@ git commit -m "feat: preload normalized model after selection and download"
 
 **Interfaces:**
 - Consumes: normalized selection and preload wiring from Task 4.
-- Produces: `invalidateSelection(preferredLocale:)` that cancels/release/switches resources, ignores late cancelled results, and `releasePreparedResources()` for app termination.
+- Produces: `invalidateSelection(preferredLocale:)` that only cancels/releases and advances selection generation, ignores late cancelled results, and `releasePreparedResources()` for app termination. The coordinator, not invalidation, starts the next preload after its installed check.
 
 - [ ] **Step 1: Add failing race, swap, and release tests.**
 
@@ -546,15 +776,15 @@ git commit -m "feat: preload normalized model after selection and download"
 func testSelectionSwapCancelsOldPreloadReleasesOldModelAndPreparesNewModelOnce() async throws {
     let client = StubTranscriptionModelClient(
         installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")],
-        prepareDelays: ["en-US": 200_000_000, "it-IT": 10_000_000]
     )
     let engine = makeEngine(client: client)
 
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
     try await client.waitForPrepareStart(locale: "en-US")
     engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+    engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+    await client.completePrepare(locale: "en-US")
     try await client.waitForResidentLocale("it-IT")
-    try await Task.sleep(nanoseconds: 250_000_000)
 
     XCTAssertEqual(client.prepareLocales, ["en-US", "it-IT"])
     XCTAssertEqual(client.releaseLocales, ["en-US"])
@@ -586,28 +816,51 @@ func testApplicationTerminationReleasesResidentPreparedModel() async throws {
     XCTAssertEqual(client.releaseLocales, ["en-US"])
 }
 
-func testPreloadMarkerClearsOnlyForMatchingOperationOnSuccessFailureAndCancellation() async throws {
+func testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording() async throws {
     let client = StubTranscriptionModelClient(
         installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")],
-        prepareErrors: [nil, .prepare, nil],
-        prepareDelays: ["it-IT": 200_000_000]
+        probe: PreloadTestProbe(),
+        ignoreCancellation: true,
+        failPrepareFor: ["en-US"]
     )
     let engine = makeEngine(client: client)
 
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
-    try await client.waitForPrepareCount(1)
-    try await client.waitForPreloadCompletion(locale: "en-US")
-    XCTAssertFalse(engine.hasInFlightPreloadForTesting)
-
-    engine.preload(preferredLocale: Locale(identifier: "en-US"))
-    try await client.waitForPrepareCount(2)
-    try await client.waitForPreloadFailure()
-    XCTAssertFalse(engine.hasInFlightPreloadForTesting)
+    try await client.waitForEvent { event in
+        if case .prepareStarted("en-US", _) = event { return true }
+        return false
+    }
+    engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+    engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+    try await client.waitForEvent { event in
+        if case .prepareStarted("it-IT", _) = event { return true }
+        return false
+    }
 
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
-    try await client.waitForPrepareStart(locale: "it-IT")
-    engine.invalidateSelection(preferredLocale: Locale(identifier: "en-US"))
-    XCTAssertFalse(engine.hasInFlightPreloadForTesting)
+    XCTAssertEqual((await client.snapshot()).prepareCounts["it-IT"], 1)
+
+    engine.start(preferredLocale: Locale(identifier: "it-IT"), onDownloadProgress: { _ in })
+    try await waitFor(client.probe) { event in
+        if case .recordingStarted("it-IT", _) = event { return true }
+        return false
+    }
+    XCTAssertEqual((await client.snapshot()).recordingStartedLocales, ["it-IT"])
+
+    await client.completePrepare(locale: "en-US")
+    try await client.waitForEvent { event in
+        if case .prepareFailed("en-US", _) = event { return true }
+        return false
+    }
+    XCTAssertEqual(engine.inFlightPreloadLocaleForTesting, "it-IT")
+    await client.completePrepare(locale: "it-IT")
+    try await client.waitForEvent { event in
+        if case .resourcePublished("it-IT", _) = event { return true }
+        return false
+    }
+    XCTAssertEqual((await client.snapshot()).prepareCounts["it-IT"], 1)
+    XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
+    XCTAssertEqual(engine.inFlightPreloadLocaleForTesting, "it-IT")
 }
 ```
 
@@ -624,7 +877,7 @@ Expected: the new tests fail because selection invalidation, matching marker cle
 
 - [ ] **Step 3: Implement generation-checked invalidation.**
 
-Implement `invalidateSelection(preferredLocale:)` to synchronously cancel the old `preloadTask`, increment the generation, detach and asynchronously release the current resident model, clear `preparedModel`/`activePreparedLocale`, and then call `preload(preferredLocale:)` only after the caller has established that the new locale is installed. Do not treat `CancellationError` from the old task as a user-facing failure. Every completion path must compare both generation and normalized locale before publishing; a late result must be released, never assigned.
+Implement `invalidateSelection(preferredLocale:)` to synchronously cancel the old `preloadTask`, increment the generation, detach and asynchronously release the current resident model, and clear `preparedModel`/`activePreparedLocale`. It must not call `preload` or make an installation decision. `RecordingSession` calls it first, then calls `preload` only after normalization and a positive installed check. `preload` repeats that check, so this contract cannot be bypassed by a direct caller. Do not treat `CancellationError` from the old task as a user-facing failure. Every completion path must compare both generation and normalized locale before publishing; a late result must be released, never assigned.
 
 The invalidation transition must also atomically replace the shared
 `PreloadOperationMarker`/task state before launching the new operation. The old
@@ -745,12 +998,12 @@ func testUninstalledSelectionDoesNotTriggerPreload() async throws {
 func testSuccessfulExplicitDownloadPreloadsImmediately() async throws {
     let harness = makeSessionHarness(selectedID: "it-IT", normalized: "it-IT", installed: false)
     harness.session.downloadModel(for: Locale(identifier: "it-IT"))
-    try await harness.engine.waitForEventSequence([.installCompleted("it-IT"), .preloadStarted("it-IT"), .preloadCompleted("it-IT")])
-    XCTAssertEqual(harness.engine.preloadRequests, ["it-IT"])
+    try await waitFor(harness.probe) { if case .resourcePublished("it-IT", _) = $0 { return true }; return false }
+    XCTAssertEqual(await harness.probe.preloadRequestLocales(), ["it-IT"])
 }
 
 func testEquivalentRequestsAreDeduplicated() async throws {
-    let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")], prepareDelay: 50_000_000)
+    let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
     let engine = makeEngine(client: client)
     engine.preload(preferredLocale: Locale(identifier: "en_US"))
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
@@ -786,7 +1039,7 @@ func testStopStartRetainsPreparedModel() async throws {
 }
 
 func testSelectionSwapCancelsReleasesAndReplacesModel() async throws {
-    let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")], prepareDelays: ["en-US": 200_000_000, "it-IT": 10_000_000])
+    let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")])
     let engine = makeEngine(client: client)
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
     try await client.waitForPrepareStart(locale: "en-US")
@@ -832,16 +1085,16 @@ func testTerminationReleasesResidentResources() async throws {
 }
 
 func testStaleDownloadCompletionNeverPreloadsPreviousSelection() async throws {
-    let harness = makeSessionHarness(selectedID: "en-US", normalized: "en-US", installed: false, installDelay: 200_000_000)
+    let harness = makeSessionHarness(selectedID: "en-US", normalized: "en-US", installed: false)
     harness.session.downloadModel(for: Locale(identifier: "en-US"))
     try await harness.installer.waitForInstallStart(locale: "en-US")
     harness.session.selectTranscriptionLocale(id: "it-IT")
     try await harness.installer.completeInstall(locale: "en-US")
     try await harness.installer.waitForInstallCompleted(locale: "en-US")
 
-    XCTAssertEqual(harness.engine.preloadRequests, [])
-    XCTAssertEqual(harness.engine.prepareRequests, [])
-    XCTAssertEqual(harness.engine.publishedPreparedLocales, [])
+    XCTAssertEqual(await harness.probe.preloadRequestLocales(), [])
+    XCTAssertEqual(await harness.probe.prepareRequestLocales(), [])
+    XCTAssertEqual(await harness.probe.publishedLocales(), [])
 }
 
 func testFailedOrCancelledPreloadMarkerIsNotReusedByDeduplicatedCaller() async throws {
@@ -928,7 +1181,7 @@ Otherwise, make no empty review commit.
 
 ## Self-Review Outcome
 
-- **Spec coverage:** Every requirement in the approved design is mapped to Tasks 1-7, including stale download completion, matching marker cleanup for all terminal paths, deduplicated-caller recovery, all lifecycle test categories, and both fallback paths.
-- **Placeholder scan:** The executable plan contains concrete interfaces, paths, symbols, test bodies/pseudocode, commands, expected outputs, and commit commands; no behavior is left undefined.
+- **Spec coverage:** Every requirement in the approved design is mapped to Tasks 1-7, including stale download completion, matching marker cleanup for all terminal paths, deduplicated-caller recovery, the gated A→B late-failure race, all lifecycle test categories, and both fallback paths.
+- **Placeholder scan:** The executable plan contains concrete interfaces, paths, symbols, test bodies/pseudocode, explicit probe gates, XCTest event waits, commands, expected outputs, and commit commands; no timing sleep or undefined engine-observation surface remains. Recording-start behavior is observed through `recordRecordingStart` and `.recordingStarted`, while the live A→B marker is observed through `inFlightPreloadLocaleForTesting` after the gated A terminal event.
 - **Type consistency:** The same `TranscriptionModelClient`, `PreparedTranscriptionModel`, `NormalizedSelectionIdentity`, `PreloadOperationMarker`, locale resolver, installer, engine lifecycle methods, and session termination hook are used across all tasks; operation/generation matching is explicit in every cleanup path.
-- **Scope:** No UI, transcript format, mix, or unrelated application area is included. The plan modifies only the three approved integration files and adds one focused lifecycle test file.
+- **Scope:** No UI, transcript format, mix, or unrelated application area is included. The plan modifies only the three approved integration files and adds one focused lifecycle test file. `invalidateSelection` only invalidates/releases; coordinator wiring and the engine's repeated installed check are consistent with selected-model-installed-only.
