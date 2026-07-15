@@ -7,6 +7,8 @@ import AppKit
 /// cleared on the next start.
 struct RecorderView: View {
     let session: RecordingSession
+    @State private var isShowingNamePrompt = false
+    @State private var nameInput = ""
 
     private var timerColor: Color {
         guard session.isRecording else { return .secondary }
@@ -61,6 +63,19 @@ struct RecorderView: View {
 
             RecordControlCluster(session: session)
                 .padding(.bottom, 18)
+        }
+        .onChange(of: session.isRecording) { _, isRecording in
+            if isRecording {
+                nameInput = ""
+                isShowingNamePrompt = true
+            }
+        }
+        .alert("Name This Recording", isPresented: $isShowingNamePrompt) {
+            TextField("Recording name (optional)", text: $nameInput)
+            Button("Save") { session.desiredRecordingName = nameInput }
+            Button("Skip", role: .cancel) { }
+        } message: {
+            Text("Leave blank to use the default timestamp name.")
         }
     }
 
