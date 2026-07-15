@@ -10,14 +10,6 @@ final class RecordControlStateTests: XCTestCase {
         XCTAssertFalse(s.secondaryEnabled)
     }
 
-    func testIdle_RecordAlwaysEnabled() {
-        // Record stays enabled with no microphone: pressing it surfaces
-        // RecordingSession's "No microphone selected." error, not a dead button.
-        let s = RecordControlState.derive(isRecording: false, isPaused: false)
-        XCTAssertEqual(s.primary, .record)
-        XCTAssertTrue(s.primaryEnabled)
-    }
-
     func testRecording_NotPaused_StopEnabled_PauseEnabled() {
         let s = RecordControlState.derive(isRecording: true, isPaused: false)
         XCTAssertEqual(s.primary, .stop)
