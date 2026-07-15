@@ -22,6 +22,31 @@ final class RecordingStore {
         recordings = Self.scan(directory: directory)
     }
 
+    /// Renames `recording`'s `.m4a` (and its `.txt` transcript, if any) to
+    /// `newName`. A blank name or a name equal to the current one is a no-op.
+    /// Collisions get an automatic numeric suffix — never an overwrite, never
+    /// a blocking error. If the transcript move fails after the audio move
+    /// already succeeded, the audio move is rolled back so the pair never
+    /// ends up split across two names.
+    func rename(_ recording: Recording, to newName: String) throws {
+        let sanitized = RecordingNaming.sanitize(newName)
+        guard !sanitized.isEmpty, sanitized != recording.name else { return }
+
+        let finalBaseName = RecordingNaming.uniqueBaseName(preferred: sanitized, in: directory)
+        let newAudioURL = directory.appendingPathComponent("\(finalBaseName).m4a")
+        try FileManager.default.moveItem(at: recording.url, to: newAudioURL)
+
+        if let oldTranscriptURL = recording.transcriptURL {
+            let newTranscriptURL = directory.appendingPathComponent("\(finalBaseName).txt")
+            do {
+                try FileManager.default.moveItem(at: oldTranscriptURL, to: newTranscriptURL)
+            } catch {
+                try? FileManager.default.moveItem(at: newAudioURL, to: recording.url)
+                throw error
+            }
+        }
+    }
+
     static func scan(directory: URL) -> [Recording] {
         let fm = FileManager.default
         guard let urls = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {

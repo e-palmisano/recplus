@@ -59,4 +59,80 @@ final class RecordingStoreTests: XCTestCase {
         let missing = tempDir.appendingPathComponent("nope", isDirectory: true)
         XCTAssertTrue(RecordingStore.scan(directory: missing).isEmpty)
     }
+
+    func testRenameMovesAudioAndTranscriptPair() throws {
+        let audioURL = try writeM4A(named: "Old Name")
+        let transcriptURL = tempDir.appendingPathComponent("Old Name.txt")
+        try "hello".write(to: transcriptURL, atomically: true, encoding: .utf8)
+        let store = RecordingStore(directory: tempDir)
+        let recording = Recording(url: audioURL, date: Date(), duration: 1, transcriptURL: transcriptURL)
+
+        try store.rename(recording, to: "New Name")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("New Name.m4a").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("New Name.txt").path))
+    }
+
+    func testRenameWithoutTranscriptMovesOnlyAudio() throws {
+        let audioURL = try writeM4A(named: "Old Name")
+        let store = RecordingStore(directory: tempDir)
+        let recording = Recording(url: audioURL, date: Date(), duration: 1, transcriptURL: nil)
+
+        try store.rename(recording, to: "New Name")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("New Name.m4a").path))
+    }
+
+    func testRenameAppendsSuffixOnCollision() throws {
+        _ = try writeM4A(named: "Target")
+        let audioURL = try writeM4A(named: "Old Name")
+        let store = RecordingStore(directory: tempDir)
+        let recording = Recording(url: audioURL, date: Date(), duration: 1, transcriptURL: nil)
+
+        try store.rename(recording, to: "Target")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("Target 2.m4a").path))
+    }
+
+    func testRenameIsNoOpWhenNameUnchanged() throws {
+        let audioURL = try writeM4A(named: "Same Name")
+        let store = RecordingStore(directory: tempDir)
+        let recording = Recording(url: audioURL, date: Date(), duration: 1, transcriptURL: nil)
+
+        try store.rename(recording, to: "Same Name")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
+    func testRenameIsNoOpForBlankName() throws {
+        let audioURL = try writeM4A(named: "Old Name")
+        let store = RecordingStore(directory: tempDir)
+        let recording = Recording(url: audioURL, date: Date(), duration: 1, transcriptURL: nil)
+
+        try store.rename(recording, to: "   ")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
+    }
+
+    func testRenameRollsBackAudioMoveWhenTranscriptMoveFails() throws {
+        let audioURL = try writeM4A(named: "Old Name")
+        let oldTranscriptURL = tempDir.appendingPathComponent("Old Name.txt")
+        try "hello".write(to: oldTranscriptURL, atomically: true, encoding: .utf8)
+        // Pre-existing file at the destination transcript path blocks the second
+        // move deterministically (uniqueBaseName only checks .m4a collisions, so
+        // "New Name" is chosen with no suffix even though "New Name.txt" exists).
+        try "blocker".write(
+            to: tempDir.appendingPathComponent("New Name.txt"), atomically: true, encoding: .utf8)
+        let store = RecordingStore(directory: tempDir)
+        let recording = Recording(url: audioURL, date: Date(), duration: 1, transcriptURL: oldTranscriptURL)
+
+        XCTAssertThrowsError(try store.rename(recording, to: "New Name"))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path), "audio rolled back")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldTranscriptURL.path), "old transcript untouched")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("New Name.m4a").path),
+            "no orphaned renamed audio")
+    }
 }
