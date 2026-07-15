@@ -6,7 +6,7 @@ import AppKit
 /// glass control cluster. The transcript persists after stop and is
 /// cleared on the next start.
 struct RecorderView: View {
-    @ObservedObject var session: RecordingSession
+    let session: RecordingSession
 
     private var timerColor: Color {
         guard session.isRecording else { return .secondary }
@@ -24,13 +24,10 @@ struct RecorderView: View {
                 GlassEffectContainer(spacing: 16) {
                     VStack(spacing: 16) {
                         if session.isRecording {
-                            VStack(spacing: 8) {
-                                LevelMeterView(symbolName: "mic.fill", level: session.micLevel)
-                                LevelMeterView(symbolName: "speaker.wave.2.fill", level: session.systemLevel)
-                            }
-                            .padding(14)
-                            .frame(maxWidth: 340)
-                            .glassEffect(in: .rect(cornerRadius: 12))
+                            LevelMetersView(levels: session.levels)
+                                .padding(14)
+                                .frame(maxWidth: 340)
+                                .glassEffect(in: .rect(cornerRadius: 12))
                         }
 
                         TranscriptPanel(
@@ -40,14 +37,6 @@ struct RecorderView: View {
                         )
                         .frame(minHeight: 200, idealHeight: 280)
                     }
-                }
-
-                if session.isRecording && session.isDownloadingModel {
-                    ProgressView(value: session.modelDownloadProgress) {
-                        Text("Downloading transcription model…")
-                            .font(.caption)
-                    }
-                    .frame(maxWidth: 280)
                 }
 
                 if let errorMessage = session.errorMessage {
@@ -81,7 +70,6 @@ struct RecorderView: View {
             Image(systemName: session.isRecording ? "waveform" : "record.circle")
                 .font(.system(size: 22))
                 .foregroundStyle(.secondary)
-                .symbolEffect(.pulse, options: .repeating, isActive: session.isRecording && !session.isDownloadingModel)
             if session.isRecording && session.isDownloadingModel {
                 Text("Downloading transcription model…")
                     .font(.callout)

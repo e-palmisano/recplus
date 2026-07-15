@@ -4,7 +4,7 @@ import SwiftUI
 /// Record/Stop (primary, red). State is derived via `RecordControlState`
 /// so the logic stays testable; this view only renders + binds actions.
 struct RecordControlCluster: View {
-    @ObservedObject var session: RecordingSession
+    let session: RecordingSession
 
     private var state: RecordControlState {
         .derive(isRecording: session.isRecording, isPaused: session.isPaused)

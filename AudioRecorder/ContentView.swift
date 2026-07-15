@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @ObservedObject var session: RecordingSession
+    @Bindable var session: RecordingSession
     @State private var store = RecordingStore()
     @State private var selectionID: Recording.ID?
 
@@ -45,6 +45,17 @@ struct ContentView: View {
         }
         .frame(minWidth: 640, minHeight: 400)
         .toolbar {
+            if selectedRecording != nil {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        selectionID = nil
+                    } label: {
+                        Label("Back to Recorder", systemImage: "chevron.left")
+                    }
+                    .help("Back to Recorder")
+                }
+            }
+
             ToolbarItem {
                 Picker("Microphone", selection: $session.selectedMicID) {
                     ForEach(session.availableMics) { mic in
@@ -55,7 +66,62 @@ struct ContentView: View {
                 .help("Input microphone")
             }
 
+            ToolbarItem {
+                Picker("Language", selection: $session.selectedTranscriptionLocaleID) {
+                    ForEach(session.availableTranscriptionLocales, id: \.identifier) { locale in
+                        Text(RecordingSession.localeDisplayName(locale)).tag(locale.identifier)
+                    }
+                }
+                .disabled(session.isRecording || session.availableTranscriptionLocales.isEmpty)
+                .help("Transcription language")
+            }
+
+            ToolbarItem {
+                Button {
+                    session.downloadModel(
+                        for: Locale(identifier: session.selectedTranscriptionLocaleID)
+                    )
+                } label: {
+                    Label("Download Selected Model", systemImage: "arrow.down.circle")
+                }
+                .disabled(
+                    session.isRecording
+                        || session.isDownloadingModel
+                        || session.availableTranscriptionLocales.isEmpty
+                )
+                .help("Download the selected transcription model")
+            }
+
             ToolbarSpacer()
+        }
+        .alert(
+            "Download Transcription Model",
+            isPresented: Binding(
+                get: { session.modelDownloadPromptLocale != nil },
+                set: { if !$0 { session.modelDownloadPromptLocale = nil } }
+            ),
+            presenting: session.modelDownloadPromptLocale
+        ) { locale in
+            Button("Download") { session.downloadModel(for: locale) }
+            Button("Later", role: .cancel) { session.modelDownloadPromptLocale = nil }
+        } message: { locale in
+            Text("Live transcription in \(RecordingSession.localeDisplayName(locale)) needs a one-time model download. If you skip it, the download will happen when you start recording.")
+        }
+        .sheet(isPresented: Binding(
+            get: { session.isDownloadingModel },
+            set: { _ in }
+        )) {
+            VStack(spacing: 12) {
+                Text("Downloading transcription model…")
+                    .font(.headline)
+                ProgressView(value: session.modelDownloadProgress)
+                    .frame(width: 260)
+                Text("\(Int(session.modelDownloadProgress * 100))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(28)
+            .interactiveDismissDisabled()
         }
         .onChange(of: session.isRecording) { _, isRecording in
             if isRecording { selectionID = nil }
@@ -66,6 +132,9 @@ struct ContentView: View {
         .onAppear {
             store.refresh()
             session.refreshMics()
+        }
+        .task {
+            session.promptModelDownloadIfNeeded()
         }
     }
 

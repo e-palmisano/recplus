@@ -3,7 +3,7 @@ import AppKit
 
 @main
 struct AudioRecorderApp: App {
-    @StateObject private var session = RecordingSession()
+    @State private var session = RecordingSession()
 
     var body: some Scene {
         WindowGroup {

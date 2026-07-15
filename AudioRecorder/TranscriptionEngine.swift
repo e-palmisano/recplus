@@ -26,11 +26,19 @@ final class TranscriptionEngine: @unchecked Sendable {
 
     private let onLineFinalized: (TranscriptLine) -> Void
     private let onPendingTextChanged: (String) -> Void
+    private let onSetupFailed: (String) -> Void
 
     private let bufferLock = NSLock()
     private var systemAccumulator: [Float] = []
     private var micAccumulator: [Float] = []
     private var pendingText: String = ""
+
+    // One resampler per source: each is only ever called from that source's
+    // own serial audio callback, and caches its `AVAudioConverter` across
+    // calls (see LiveResampler's doc comment) instead of rebuilding it per
+    // buffer.
+    private let micResampler = LiveResampler()
+    private let systemResampler = LiveResampler()
 
     // Authoritative record of finalized lines, appended synchronously inside
     // `finalizeLine` on whatever thread calls it. `onLineFinalized` is a
@@ -51,9 +59,14 @@ final class TranscriptionEngine: @unchecked Sendable {
     private var feedTask: Task<Void, Never>?
     private var resultsTask: Task<Void, Never>?
 
-    init(onLineFinalized: @escaping (TranscriptLine) -> Void, onPendingTextChanged: @escaping (String) -> Void) {
+    init(
+        onLineFinalized: @escaping (TranscriptLine) -> Void,
+        onPendingTextChanged: @escaping (String) -> Void,
+        onSetupFailed: @escaping (String) -> Void
+    ) {
         self.onLineFinalized = onLineFinalized
         self.onPendingTextChanged = onPendingTextChanged
+        self.onSetupFailed = onSetupFailed
     }
 
     /// Starts the background transcription pipeline. Locale/asset resolution
@@ -65,7 +78,7 @@ final class TranscriptionEngine: @unchecked Sendable {
     /// already-cached case reports completion immediately with no visible
     /// progress UI (unlike WhisperKit, which always did a network round-trip
     /// even for cached models).
-    func start(onDownloadProgress: @escaping @Sendable (Double) -> Void) {
+    func start(preferredLocale: Locale, onDownloadProgress: @escaping @Sendable (Double) -> Void) {
         bufferLock.withLock {
             systemAccumulator = []
             micAccumulator = []
@@ -77,7 +90,7 @@ final class TranscriptionEngine: @unchecked Sendable {
         feedTask = Task {
             do {
                 guard SpeechTranscriber.isAvailable else { throw TranscriptionSetupError.notAvailable }
-                guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current) else {
+                guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: preferredLocale) else {
                     throw TranscriptionSetupError.localeNotSupported
                 }
                 try await AssetInventory.reserve(locale: locale)
@@ -86,15 +99,11 @@ final class TranscriptionEngine: @unchecked Sendable {
                 let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
                 self.transcriber = transcriber
 
-                guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-                    throw TranscriptionSetupError.noAudioFormat
-                }
-                targetFormat = format
-
-                let analyzer = SpeechAnalyzer(modules: [transcriber])
-                self.analyzer = analyzer
-                try await analyzer.prepareToAnalyze(in: format, withProgressReadyHandler: nil)
-
+                // Asset install must come FIRST: `bestAvailableAudioFormat`
+                // reads the model's sampling rates, so on a machine where the
+                // locale's asset isn't installed yet it fails ("No GeneralASR
+                // asset for language …") and setup dies before the download
+                // was ever requested.
                 let installed = await SpeechTranscriber.installedLocales.contains(locale)
                 if !installed {
                     if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
@@ -106,6 +115,15 @@ final class TranscriptionEngine: @unchecked Sendable {
                     }
                 }
                 onDownloadProgress(1.0)
+
+                guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                    throw TranscriptionSetupError.noAudioFormat
+                }
+                targetFormat = format
+
+                let analyzer = SpeechAnalyzer(modules: [transcriber])
+                self.analyzer = analyzer
+                try await analyzer.prepareToAnalyze(in: format, withProgressReadyHandler: nil)
 
                 let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
                 inputContinuation = continuation
@@ -132,8 +150,10 @@ final class TranscriptionEngine: @unchecked Sendable {
             } catch {
                 // Transcription unavailable (locale/permission/download failure) —
                 // recording continues audio-only. Report completion so the UI
-                // doesn't show a stuck progress bar.
+                // doesn't show a stuck progress bar, and surface the reason so
+                // the failure isn't silent.
                 onDownloadProgress(1.0)
+                onSetupFailed(Self.setupFailureMessage(for: error))
             }
         }
     }
@@ -144,8 +164,9 @@ final class TranscriptionEngine: @unchecked Sendable {
     /// Resampling happens immediately, before this function returns; only the
     /// resulting plain `[Float]` is stored for the mix loop to pick up.
     func ingest(buffer: AVAudioPCMBuffer, format: AVAudioFormat, isSystem: Bool) {
+        let resampler = isSystem ? systemResampler : micResampler
         guard let target = targetFormat,
-              let samples = try? LiveResampler.resampleToMono16k(buffer: buffer, from: format, targetFormat: target) else { return }
+              let samples = try? resampler.resampleToMono16k(buffer: buffer, from: format, targetFormat: target) else { return }
 
         bufferLock.withLock {
             if isSystem {
@@ -173,14 +194,45 @@ final class TranscriptionEngine: @unchecked Sendable {
         }
     }
 
-    private static func makeBuffer(samples: [Float], format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }
-        buffer.frameLength = buffer.frameCapacity
-        guard let channelData = buffer.floatChannelData else { return nil }
-        samples.withUnsafeBufferPointer { pointer in
-            guard let base = pointer.baseAddress else { return }
-            channelData[0].update(from: base, count: samples.count)
+    private static func setupFailureMessage(for error: Error) -> String {
+        switch error {
+        case TranscriptionSetupError.notAvailable:
+            return "Live transcription is not available on this Mac. Recording continues audio-only."
+        case TranscriptionSetupError.localeNotSupported:
+            return "Live transcription does not support your system language. Recording continues audio-only."
+        case TranscriptionSetupError.noAudioFormat:
+            return "The transcription model could not be prepared. Recording continues audio-only."
+        default:
+            return "Live transcription unavailable: \(error.localizedDescription). Recording continues audio-only."
         }
+    }
+
+    private static func makeBuffer(samples: [Float], format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(samples.count)
+        ) else {
+            return nil
+        }
+        buffer.frameLength = buffer.frameCapacity
+
+        switch format.commonFormat {
+        case .pcmFormatFloat32:
+            guard let channelData = buffer.floatChannelData else { return nil }
+            samples.withUnsafeBufferPointer { pointer in
+                guard let base = pointer.baseAddress else { return }
+                channelData[0].update(from: base, count: samples.count)
+            }
+        case .pcmFormatInt16:
+            guard let channelData = buffer.int16ChannelData else { return nil }
+            for index in samples.indices {
+                let sample = max(-1, min(1, samples[index]))
+                channelData[0][index] = Int16((sample * Float(Int16.max)).rounded())
+            }
+        default:
+            return nil
+        }
+
         return buffer
     }
 
