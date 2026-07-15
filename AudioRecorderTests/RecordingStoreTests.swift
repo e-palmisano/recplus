@@ -66,6 +66,16 @@ final class RecordingStoreTests: XCTestCase {
         XCTAssertEqual(recordings[0].date.timeIntervalSinceNow, 0, accuracy: 5)
     }
 
+    func testSidebarPresentationUsesRecordingNameAsTitle() {
+        let recording = Recording(
+            url: tempDir.appendingPathComponent("Entered Name.m4a"),
+            date: Date(),
+            duration: 1,
+            transcriptURL: nil)
+
+        XCTAssertEqual(RecordingSidebarPresentation(recording: recording).title, "Entered Name")
+    }
+
     func testScanOfMissingDirectoryIsEmpty() {
         let missing = tempDir.appendingPathComponent("nope", isDirectory: true)
         XCTAssertTrue(RecordingStore.scan(directory: missing).isEmpty)

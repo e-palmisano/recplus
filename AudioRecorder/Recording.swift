@@ -10,3 +10,11 @@ struct Recording: Identifiable, Hashable {
     var id: URL { url }
     var name: String { url.deletingPathExtension().lastPathComponent }
 }
+
+struct RecordingSidebarPresentation: Equatable {
+    let title: String
+
+    init(recording: Recording) {
+        title = recording.name
+    }
+}

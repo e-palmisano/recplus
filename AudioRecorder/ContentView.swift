@@ -16,6 +16,7 @@ struct ContentView: View {
         NavigationSplitView {
             List(store.recordings, selection: $selectionID) { recording in
                 VStack(alignment: .leading, spacing: 2) {
+                    Text(RecordingSidebarPresentation(recording: recording).title)
                     Text(recording.date.formatted(date: .abbreviated, time: .shortened))
                     HStack(spacing: 6) {
                         Text(RecordingFormat.elapsedTimeString(recording.duration))
