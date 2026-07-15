@@ -157,17 +157,47 @@ enum PreloadTestEvent: Equatable, Sendable {
     case recordingStarted(String, UUID?)
 }
 
+enum StubError: Error, Equatable, Sendable {
+    case prepare
+}
+
+enum PreloadCountKind: Sendable {
+    case prepareStarted
+    case resourceReleased
+    case installStarted
+}
+
 actor PreloadTestProbe {
     private(set) var events: [PreloadTestEvent] = []
     private var waiters: [(PreloadTestEvent) -> Bool, CheckedContinuation<Void, Never>] = []
     private var prepareGates: [String: [CheckedContinuation<Void, Never>]] = [:]
     private var installGates: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var countWaiters: [(kind: PreloadCountKind, count: Int, CheckedContinuation<Void, Never>)] = []
 
     func record(_ event: PreloadTestEvent) {
         events.append(event)
         let ready = waiters.filter { $0.0(event) }.map(\.1)
         waiters.removeAll { $0.0(event) }
         ready.forEach { $0.resume() }
+        let countReady = countWaiters.filter { waiter in
+            let matchingEvents = events.filter { event in
+                switch waiter.kind {
+                case .prepareStarted: if case .prepareStarted = event { return true }
+                case .resourceReleased: if case .resourceReleased = event { return true }
+                case .installStarted: if case .installStarted = event { return true }
+                }
+                return false
+            }
+            return matchingEvents.count >= waiter.count
+        }.map { $0.2 }
+        countWaiters.removeAll { waiter in
+            switch waiter.kind {
+            case .prepareStarted: return events.filter { if case .prepareStarted = $0 { return true }; return false }.count >= waiter.count
+            case .resourceReleased: return events.filter { if case .resourceReleased = $0 { return true }; return false }.count >= waiter.count
+            case .installStarted: return events.filter { if case .installStarted = $0 { return true }; return false }.count >= waiter.count
+            }
+        }
+        countReady.forEach { $0.resume() }
     }
 
     func waitFor(_ predicate: @escaping (PreloadTestEvent) -> Bool) async {
@@ -181,6 +211,21 @@ actor PreloadTestProbe {
         await withCheckedContinuation { continuation in
             prepareGates[locale, default: []].append(continuation)
         }
+    }
+
+    func waitForPrepareCount(_ count: Int) async {
+        if events.filter({ if case .prepareStarted = $0 { return true }; return false }).count >= count { return }
+        await withCheckedContinuation { continuation in countWaiters.append((.prepareStarted, count, continuation)) }
+    }
+
+    func waitForReleaseCount(_ count: Int) async {
+        if events.filter({ if case .resourceReleased = $0 { return true }; return false }).count >= count { return }
+        await withCheckedContinuation { continuation in countWaiters.append((.resourceReleased, count, continuation)) }
+    }
+
+    func waitForInstallCount(_ count: Int) async {
+        if events.filter({ if case .installStarted = $0 { return true }; return false }).count >= count { return }
+        await withCheckedContinuation { continuation in countWaiters.append((.installStarted, count, continuation)) }
     }
 
     func completePrepare(locale: String) {
@@ -208,6 +253,10 @@ actor PreloadTestProbe {
     func prepareRequestLocales() -> [String] {
         events.compactMap { if case .prepareStarted(let locale, _) = $0 { return locale }; return nil }
     }
+
+    func releaseLocales() -> [String] {
+        events.compactMap { if case .resourceReleased(let locale, _) = $0 { return locale }; return nil }
+    }
 }
 
 ```
@@ -233,7 +282,14 @@ The test double has these concrete members used by the pseudocode:
 ```swift
 struct StubSnapshot: Sendable {
     let prepareCounts: [String: Int]
+    let prepareLocales: [String]
+    let normalizedLocales: [String]
+    let preloadRequestLocales: [String]
+    let releaseLocales: [String]
     let recordingStartedLocales: [String]
+    let installCount: Int
+    let setupFailureCount: Int
+    let preparedIdentity: UUID?
 }
 
 actor StubTranscriptionModelClient: TranscriptionModelClient {
@@ -241,18 +297,26 @@ actor StubTranscriptionModelClient: TranscriptionModelClient {
     let probe: PreloadTestProbe
     let ignoredCancellation: Bool
     let failedLocales: Set<String>
-    var counts: [String: Int] = [:]
-    var recordingStartedLocales: [String] = []
+    private var prepareErrors: [StubError?]
+    private var counts: [String: Int] = [:]
+    private var normalizedLocales: [String] = []
+    private var prepareLocales: [String] = []
+    private var installCount = 0
+    private var setupFailureCount = 0
+    private var recordingStartedLocales: [String] = []
+    private var preparedIdentities: [UUID] = []
 
-    init(installed: [Locale], probe: PreloadTestProbe = PreloadTestProbe(), ignoreCancellation: Bool = false, failPrepareFor: Set<String> = []) {
+    init(installed: [Locale], probe: PreloadTestProbe = PreloadTestProbe(), ignoreCancellation: Bool = false, failPrepareFor: Set<String> = [], prepareError: StubError? = nil, prepareErrors: [StubError?] = []) {
         self.installed = Set(installed.map(\.identifier))
         self.probe = probe
         self.ignoredCancellation = ignoreCancellation
         self.failedLocales = failPrepareFor
+        self.prepareErrors = prepareErrors.isEmpty ? (prepareError.map { [$0] } ?? []) : prepareErrors
     }
 
     func normalizedLocale(for preferredLocale: Locale) async -> Locale? {
         let locale = Locale(identifier: preferredLocale.identifier.replacingOccurrences(of: "_", with: "-"))
+        normalizedLocales.append(locale.identifier)
         await probe.record(.normalized(locale.identifier))
         return locale
     }
@@ -266,9 +330,13 @@ actor StubTranscriptionModelClient: TranscriptionModelClient {
     func prepare(locale: Locale) async throws -> PreparedTranscriptionModel {
         let identity = UUID()
         counts[locale.identifier, default: 0] += 1
+        prepareLocales.append(locale.identifier)
+        preparedIdentities.append(identity)
         await probe.record(.prepareStarted(locale.identifier, identity))
         await probe.waitForPrepareRelease(locale: locale.identifier)
-        if failedLocales.contains(locale.identifier) {
+        let error = prepareErrors.indices.contains(counts[locale.identifier, default: 1] - 1) ? prepareErrors[counts[locale.identifier, default: 1] - 1] : nil
+        if failedLocales.contains(locale.identifier) || error != nil {
+            setupFailureCount += 1
             await probe.record(.prepareFailed(locale.identifier, identity))
             throw StubError.prepare
         }
@@ -278,6 +346,7 @@ actor StubTranscriptionModelClient: TranscriptionModelClient {
     }
 
     func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        installCount += 1
         await probe.record(.installStarted(locale.identifier))
         await probe.waitForInstallRelease(locale: locale.identifier)
         installed.insert(locale.identifier)
@@ -298,8 +367,73 @@ actor StubTranscriptionModelClient: TranscriptionModelClient {
         await probe.completePrepare(locale: locale)
     }
 
-    func snapshot() -> StubSnapshot {
-        StubSnapshot(prepareCounts: counts, recordingStartedLocales: recordingStartedLocales)
+    func completeInstall(locale: String) async {
+        await probe.completeInstall(locale: locale)
+    }
+
+    func snapshot() async -> StubSnapshot {
+        StubSnapshot(
+            prepareCounts: counts,
+            prepareLocales: prepareLocales,
+            normalizedLocales: normalizedLocales,
+            preloadRequestLocales: await probe.preloadRequestLocales(),
+            releaseLocales: await probe.releaseLocales(),
+            recordingStartedLocales: recordingStartedLocales,
+            installCount: installCount,
+            setupFailureCount: setupFailureCount,
+            preparedIdentity: preparedIdentities.last
+        )
+    }
+
+    func waitForEvent(_ predicate: @escaping (PreloadTestEvent) -> Bool) async throws {
+        try await waitFor(probe, predicate)
+    }
+
+    func waitForPrepareStart(locale: String) async throws {
+        try await waitForEvent { if case .prepareStarted(locale, _) = $0 { return true }; return false }
+    }
+
+    func waitForPrepareCount(_ count: Int) async throws {
+        await probe.waitForPrepareCount(count)
+    }
+
+    func waitForPreloadFailure() async throws {
+        try await waitForEvent { if case .prepareFailed = $0 { return true }; return false }
+    }
+
+    func waitForResidentLocale(_ locale: String) async throws {
+        try await waitForEvent { if case .resourcePublished(locale, _) = $0 { return true }; return false }
+    }
+
+    func waitForLateResult(locale: String) async throws {
+        try await waitForEvent { event in
+            if case .prepareFailed(locale, _) = event { return true }
+            if case .prepareFinished(locale, _) = event { return true }
+            return false
+        }
+    }
+
+    func waitForReleaseCount(_ count: Int) async throws {
+        await probe.waitForReleaseCount(count)
+    }
+
+    func waitForActiveIdentity(_ expectedIdentity: UUID?) async throws {
+        try await waitForEvent { event in
+            if case .recordingStarted(_, identity) = event { return identity == expectedIdentity }
+            return false
+        }
+    }
+
+    func waitForInstalledCheck() async throws {
+        try await waitForEvent { if case .installedCheck = $0 { return true }; return false }
+    }
+
+    func waitForInstallCount(_ count: Int) async throws {
+        await probe.waitForInstallCount(count)
+    }
+
+    func waitForInstallCompleted(locale: String) async throws {
+        try await waitForEvent { if case .installCompleted(locale) = $0 { return true }; return false }
     }
 }
 
@@ -384,14 +518,15 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         let engine = makeEngine(client: client)
 
         engine.preload(preferredLocale: Locale(identifier: "en_US"))
-        try await waitFor(client.probe) { if case .prepareStarted("en-US", _) = $0 { return true }; return false }
+        try await client.waitForEvent { if case .prepareStarted("en-US", _) = $0 { return true }; return false }
         await client.completePrepare(locale: "en-US")
-        try await waitFor(client.probe) { if case .resourcePublished("en-US", _) = $0 { return true }; return false }
+        try await client.waitForEvent { if case .resourcePublished("en-US", _) = $0 { return true }; return false }
 
-        XCTAssertEqual(client.normalizedLocales, ["en-US"])
-        XCTAssertEqual(client.prepareLocales, ["en-US"])
-        XCTAssertEqual(client.releaseCount, 0)
-        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.normalizedLocales, ["en-US"])
+    XCTAssertEqual(snapshot.prepareLocales, ["en-US"])
+    XCTAssertTrue(snapshot.releaseLocales.isEmpty)
+    XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
     }
 }
 ```
@@ -458,9 +593,10 @@ func testPreloadDoesNotPrepareAnUninstalledSelectedLocale() async throws {
     let engine = makeEngine(client: client)
 
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
-    try await waitFor(client.probe) { if case .installedCheck("it-IT", false) = $0 { return true }; return false }
+    try await client.waitForEvent { if case .installedCheck("it-IT", false) = $0 { return true }; return false }
 
-    XCTAssertTrue(client.prepareLocales.isEmpty)
+    let snapshot = await client.snapshot()
+    XCTAssertTrue(snapshot.prepareLocales.isEmpty)
     XCTAssertNil(engine.preparedLocaleForTesting)
 }
 
@@ -480,8 +616,9 @@ func testEquivalentConcurrentPreloadsShareOnePreparationOperation() async throws
         return false
     }
 
-    XCTAssertEqual(client.prepareLocales, ["en-US"])
-    XCTAssertEqual(client.prepareCount, 1)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareLocales, ["en-US"])
+    XCTAssertEqual(snapshot.prepareCounts["en-US"], 1)
 }
 
 func testEquivalentRequestAfterFailedPreloadDoesNotAwaitStaleTask() async throws {
@@ -493,12 +630,14 @@ func testEquivalentRequestAfterFailedPreloadDoesNotAwaitStaleTask() async throws
 
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
     try await client.waitForPrepareCount(1)
+    await client.completePrepare(locale: "en-US")
     try await client.waitForPreloadFailure()
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
     try await client.waitForPrepareCount(2)
 
-    XCTAssertEqual(client.prepareLocales, ["en-US", "en-US"])
-    XCTAssertEqual(client.prepareCount, 2)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareLocales, ["en-US", "en-US"])
+    XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
 }
 
@@ -513,9 +652,11 @@ func testEquivalentRequestAfterCancelledPreloadDoesNotAwaitStaleTask() async thr
     try await client.waitForPrepareStart(locale: "en-US")
     engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
+    await client.completePrepare(locale: "en-US")
     try await client.waitForPrepareCount(2)
 
-    XCTAssertEqual(client.prepareCount, 2)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
 }
 ```
 
@@ -591,15 +732,19 @@ func testStartReusesPreparedModelInsteadOfPreparingAgain() async throws {
     }
 
     engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
-    XCTAssertEqual(client.prepareCount, 1)
-    XCTAssertEqual(engine.activePreparedIdentityForTesting, client.preparedIdentity)
+    let snapshot = await client.snapshot()
+    let preparedIdentity = snapshot.preparedIdentity
+    XCTAssertEqual(snapshot.prepareCounts["en-US"], 1)
+    XCTAssertEqual(engine.activePreparedIdentityForTesting, preparedIdentity)
     _ = engine.stop()
-    XCTAssertEqual(client.releaseCount, 0)
+    let retainedSnapshot = await client.snapshot()
+    XCTAssertTrue(retainedSnapshot.releaseLocales.isEmpty)
 
     engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
-    try await client.waitForActiveIdentity(client.preparedIdentity)
-    XCTAssertEqual(client.prepareCount, 1)
-    XCTAssertEqual(engine.activePreparedIdentityForTesting, client.preparedIdentity)
+    try await client.waitForActiveIdentity(preparedIdentity)
+    let restartedSnapshot = await client.snapshot()
+    XCTAssertEqual(restartedSnapshot.prepareCounts["en-US"], 1)
+    XCTAssertEqual(engine.activePreparedIdentityForTesting, preparedIdentity)
     _ = engine.stop()
 }
 
@@ -611,8 +756,9 @@ func testPreloadFailureIsSilentAndStartStillUsesDownloadFallback() async throws 
     engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
     try await client.waitForInstallCount(1)
 
-    XCTAssertEqual(client.installCount, 1)
-    XCTAssertEqual(client.setupFailureCount, 0)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.installCount, 1)
+    XCTAssertEqual(snapshot.setupFailureCount, 0)
 }
 ```
 
@@ -689,7 +835,8 @@ func testNormalizedLaunchSelectionPreloadsOnlyResolvedInstalledLocale() async th
     let harness = makeSessionHarness(selectedID: "en_US", normalized: "en-US", installed: true)
     harness.session.preloadSelectedModelAfterNormalization()
     try await waitFor(harness.probe) { if case .preloadRequested("en-US") = $0 { return true }; return false }
-    XCTAssertEqual(await harness.probe.preloadRequestLocales(), ["en-US"])
+    let preloadLocales = await harness.probe.preloadRequestLocales()
+    XCTAssertEqual(preloadLocales, ["en-US"])
 }
 
 func testSuccessfulExplicitDownloadStartsPreloadImmediately() async throws {
@@ -702,8 +849,10 @@ func testSuccessfulExplicitDownloadStartsPreloadImmediately() async throws {
     try await waitFor(harness.probe) { if case .prepareStarted("it-IT", _) = $0 { return true }; return false }
     await harness.probe.completePrepare(locale: "it-IT")
     try await waitFor(harness.probe) { if case .resourcePublished("it-IT", _) = $0 { return true }; return false }
-    XCTAssertEqual((await harness.installer.snapshot()).installCount, 1)
-    XCTAssertEqual(await harness.probe.preloadRequestLocales(), ["it-IT"])
+    let installerSnapshot = await harness.installer.snapshot()
+    let preloadLocales = await harness.probe.preloadRequestLocales()
+    XCTAssertEqual(installerSnapshot.installCount, 1)
+    XCTAssertEqual(preloadLocales, ["it-IT"])
 }
 
 func testStaleExplicitDownloadCompletionDoesNotPrepareOrPublishOldSelection() async throws {
@@ -716,12 +865,15 @@ func testStaleExplicitDownloadCompletionDoesNotPrepareOrPublishOldSelection() as
     harness.session.downloadModel(for: Locale(identifier: "en-US"))
     try await harness.installer.waitForInstallStart(locale: "en-US")
     harness.session.selectTranscriptionLocale(id: "it-IT")
-    try await harness.installer.completeInstall(locale: "en-US")
+    await harness.installer.completeInstall(locale: "en-US")
     try await waitFor(harness.probe) { if case .installCompleted("en-US") = $0 { return true }; return false }
 
-    XCTAssertEqual(await harness.probe.preloadRequestLocales(), [])
-    XCTAssertEqual(await harness.probe.publishedLocales(), [])
-    XCTAssertEqual(await harness.probe.prepareRequestLocales(), [])
+    let preloadLocales = await harness.probe.preloadRequestLocales()
+    let publishedLocales = await harness.probe.publishedLocales()
+    let preparedLocales = await harness.probe.prepareRequestLocales()
+    XCTAssertEqual(preloadLocales, [])
+    XCTAssertEqual(publishedLocales, [])
+    XCTAssertEqual(preparedLocales, [])
 }
 ```
 
@@ -809,11 +961,15 @@ func testSelectionSwapCancelsOldPreloadReleasesOldModelAndPreparesNewModelOnce()
     try await client.waitForPrepareStart(locale: "en-US")
     engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
-    await client.completePrepare(locale: "en-US")
+    try await client.waitForPrepareStart(locale: "it-IT")
+    await client.completePrepare(locale: "it-IT")
     try await client.waitForResidentLocale("it-IT")
+    await client.completePrepare(locale: "en-US")
+    try await client.waitForReleaseCount(1)
 
-    XCTAssertEqual(client.prepareLocales, ["en-US", "it-IT"])
-    XCTAssertEqual(client.releaseLocales, ["en-US"])
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareLocales, ["en-US", "it-IT"])
+    XCTAssertEqual(snapshot.releaseLocales, ["en-US"])
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
 }
 
@@ -824,11 +980,16 @@ func testCancelledPreloadLateResultCannotReplaceCurrentSelection() async throws 
     try await client.waitForPrepareStart(locale: "en-US")
     engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+    try await client.waitForPrepareStart(locale: "it-IT")
+    await client.completePrepare(locale: "it-IT")
     try await client.waitForResidentLocale("it-IT")
-    try await client.releaseLateResult("en-US")
+    await client.completePrepare(locale: "en-US")
+    try await client.waitForLateResult(locale: "en-US")
+    try await client.waitForReleaseCount(1)
 
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
-    XCTAssertEqual(client.releaseLocales.filter { $0 == "en-US" }.count, 1)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.releaseLocales.filter { $0 == "en-US" }.count, 1)
 }
 
 func testApplicationTerminationReleasesResidentPreparedModel() async throws {
@@ -845,7 +1006,8 @@ func testApplicationTerminationReleasesResidentPreparedModel() async throws {
     try await client.waitForReleaseCount(1)
 
     XCTAssertNil(engine.preparedLocaleForTesting)
-    XCTAssertEqual(client.releaseLocales, ["en-US"])
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.releaseLocales, ["en-US"])
 }
 
 func testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording() async throws {
@@ -869,15 +1031,17 @@ func testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording() async thro
         return false
     }
 
-    XCTAssertEqual((await client.snapshot()).prepareCounts["it-IT"], 1)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareCounts["it-IT"], 1)
     XCTAssertEqual(engine.inFlightPreloadLocaleForTesting, "it-IT")
 
     engine.start(preferredLocale: Locale(identifier: "it-IT"), onDownloadProgress: { _ in })
-    try await waitFor(client.probe) { event in
+    try await client.waitForEvent { event in
         if case .recordingStarted("it-IT", _) = event { return true }
         return false
     }
-    XCTAssertEqual((await client.snapshot()).recordingStartedLocales, ["it-IT"])
+    let recordingSnapshot = await client.snapshot()
+    XCTAssertEqual(recordingSnapshot.recordingStartedLocales, ["it-IT"])
 
     await client.completePrepare(locale: "en-US")
     try await client.waitForEvent { event in
@@ -890,7 +1054,8 @@ func testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording() async thro
         if case .resourcePublished("it-IT", _) = event { return true }
         return false
     }
-    XCTAssertEqual((await client.snapshot()).prepareCounts["it-IT"], 1)
+    let publishedSnapshot = await client.snapshot()
+    XCTAssertEqual(publishedSnapshot.prepareCounts["it-IT"], 1)
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
     XCTAssertNil(engine.inFlightPreloadLocaleForTesting)
 }
@@ -1024,7 +1189,8 @@ func testCachedLaunchPreloadsOnlySelectedNormalizedLocale() async throws {
         if case .resourcePublished("en-US", _) = event { return true }
         return false
     }
-    XCTAssertEqual(client.prepareLocales, ["en-US"])
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareLocales, ["en-US"])
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
 }
 
@@ -1033,8 +1199,9 @@ func testUninstalledSelectionDoesNotTriggerPreload() async throws {
     let engine = makeEngine(client: client)
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
     try await client.waitForInstalledCheck()
-    XCTAssertEqual(client.prepareCount, 0)
-    XCTAssertEqual(client.installCount, 0)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareCounts["it-IT"] ?? 0, 0)
+    XCTAssertEqual(snapshot.installCount, 0)
 }
 
 func testSuccessfulExplicitDownloadPreloadsImmediately() async throws {
@@ -1047,7 +1214,8 @@ func testSuccessfulExplicitDownloadPreloadsImmediately() async throws {
     try await waitFor(harness.probe) { if case .prepareStarted("it-IT", _) = $0 { return true }; return false }
     await harness.probe.completePrepare(locale: "it-IT")
     try await waitFor(harness.probe) { if case .resourcePublished("it-IT", _) = $0 { return true }; return false }
-    XCTAssertEqual(await harness.probe.preloadRequestLocales(), ["it-IT"])
+    let preloadLocales = await harness.probe.preloadRequestLocales()
+    XCTAssertEqual(preloadLocales, ["it-IT"])
 }
 
 func testEquivalentRequestsAreDeduplicated() async throws {
@@ -1056,7 +1224,8 @@ func testEquivalentRequestsAreDeduplicated() async throws {
     engine.preload(preferredLocale: Locale(identifier: "en_US"))
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
     try await client.waitForPrepareCount(1)
-    XCTAssertEqual(client.prepareCount, 1)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareCounts["en-US"], 1)
 }
 
 func testRecordingStartReusesPreparedModel() async throws {
@@ -1070,9 +1239,12 @@ func testRecordingStartReusesPreparedModel() async throws {
         return false
     }
     engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
-    try await client.waitForActiveIdentity(client.preparedIdentity)
-    XCTAssertEqual(client.prepareCount, 1)
-    XCTAssertEqual(engine.activePreparedIdentityForTesting, client.preparedIdentity)
+    let initialSnapshot = await client.snapshot()
+    let preparedIdentity = initialSnapshot.preparedIdentity
+    try await client.waitForActiveIdentity(preparedIdentity)
+    let recordingSnapshot = await client.snapshot()
+    XCTAssertEqual(recordingSnapshot.prepareCounts["en-US"], 1)
+    XCTAssertEqual(engine.activePreparedIdentityForTesting, preparedIdentity)
     _ = engine.stop()
 }
 
@@ -1086,12 +1258,14 @@ func testStopStartRetainsPreparedModel() async throws {
         if case .resourcePublished("en-US", _) = event { return true }
         return false
     }
-    let identity = try XCTUnwrap(client.preparedIdentity)
+    let preparedSnapshot = await client.snapshot()
+    let identity = try XCTUnwrap(preparedSnapshot.preparedIdentity)
     engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
     _ = engine.stop()
     engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
     try await client.waitForActiveIdentity(identity)
-    XCTAssertEqual(client.releaseCount, 0)
+    let retainedSnapshot = await client.snapshot()
+    XCTAssertTrue(retainedSnapshot.releaseLocales.isEmpty)
     XCTAssertEqual(engine.activePreparedIdentityForTesting, identity)
     _ = engine.stop()
 }
@@ -1103,10 +1277,15 @@ func testSelectionSwapCancelsReleasesAndReplacesModel() async throws {
     try await client.waitForPrepareStart(locale: "en-US")
     engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+    try await client.waitForPrepareStart(locale: "it-IT")
+    await client.completePrepare(locale: "it-IT")
     try await client.waitForResidentLocale("it-IT")
-    XCTAssertEqual(client.prepareLocales, ["en-US", "it-IT"])
+    await client.completePrepare(locale: "en-US")
+    try await client.waitForReleaseCount(1)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareLocales, ["en-US", "it-IT"])
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
-    XCTAssertEqual(client.releaseLocales, ["en-US"])
+    XCTAssertEqual(snapshot.releaseLocales, ["en-US"])
 }
 
 func testLateCancelledResultIsIgnored() async throws {
@@ -1116,7 +1295,10 @@ func testLateCancelledResultIsIgnored() async throws {
     try await client.waitForPrepareStart(locale: "en-US")
     engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
     engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+    try await client.waitForPrepareStart(locale: "it-IT")
+    await client.completePrepare(locale: "it-IT")
     try await client.waitForResidentLocale("it-IT")
+    await client.completePrepare(locale: "en-US")
     try await client.waitForLateResult(locale: "en-US")
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
 }
@@ -1128,8 +1310,9 @@ func testPreloadFailureIsSilentAndRecordingFallbackInstallsAtStart() async throw
     try await client.waitForInstalledCheck()
     engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
     try await client.waitForInstallCount(1)
-    XCTAssertEqual(client.setupFailureCount, 0)
-    XCTAssertEqual(client.installCount, 1)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.setupFailureCount, 0)
+    XCTAssertEqual(snapshot.installCount, 1)
 }
 
 func testTerminationReleasesResidentResources() async throws {
@@ -1137,10 +1320,13 @@ func testTerminationReleasesResidentResources() async throws {
     let engine = makeEngine(client: client)
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
     try await client.waitForPrepareCount(1)
+    await client.completePrepare(locale: "en-US")
+    try await client.waitForResidentLocale("en-US")
     engine.releasePreparedResources()
     engine.releasePreparedResources()
     try await client.waitForReleaseCount(1)
-    XCTAssertEqual(client.releaseCount, 1)
+    let releaseSnapshot = await client.snapshot()
+    XCTAssertEqual(releaseSnapshot.releaseLocales.count, 1)
     XCTAssertNil(engine.preparedLocaleForTesting)
 }
 
@@ -1149,28 +1335,54 @@ func testStaleDownloadCompletionNeverPreloadsPreviousSelection() async throws {
     harness.session.downloadModel(for: Locale(identifier: "en-US"))
     try await harness.installer.waitForInstallStart(locale: "en-US")
     harness.session.selectTranscriptionLocale(id: "it-IT")
-    try await harness.installer.completeInstall(locale: "en-US")
+    await harness.installer.completeInstall(locale: "en-US")
     try await harness.installer.waitForInstallCompleted(locale: "en-US")
 
-    XCTAssertEqual(await harness.probe.preloadRequestLocales(), [])
-    XCTAssertEqual(await harness.probe.prepareRequestLocales(), [])
-    XCTAssertEqual(await harness.probe.publishedLocales(), [])
+    let preloadLocales = await harness.probe.preloadRequestLocales()
+    let preparedLocales = await harness.probe.prepareRequestLocales()
+    let publishedLocales = await harness.probe.publishedLocales()
+    XCTAssertEqual(preloadLocales, [])
+    XCTAssertEqual(preparedLocales, [])
+    XCTAssertEqual(publishedLocales, [])
 }
 
 func testFailedOrCancelledPreloadMarkerIsNotReusedByDeduplicatedCaller() async throws {
     let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")], prepareErrors: [.prepare, nil])
     let engine = makeEngine(client: client)
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
+    try await client.waitForPrepareCount(1)
+    await client.completePrepare(locale: "en-US")
     try await client.waitForPreloadFailure()
     engine.preload(preferredLocale: Locale(identifier: "en-US"))
     try await client.waitForPrepareCount(2)
 
-    XCTAssertEqual(client.prepareCount, 2)
+    let snapshot = await client.snapshot()
+    XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
     XCTAssertFalse(engine.hasInFlightPreloadForTesting)
 }
 ```
 
 Each test must use `waitForEvent`/actor state, assert event order (`install.completed < preload.started`), use an explicit installation gate for stale-download completion, release the installation gate and then the preparation gate before waiting for successful-download publication, and use a bounded timeout so a deadlocked task fails deterministically. Every A→B race test that expects B resident must call `preload(B)` after `invalidateSelection(A)`; invalidation itself never starts B. While B preparation is gated, assert the live B marker; after B publication, assert that the matching in-flight marker is nil. Do not change existing tests.
+
+### Deterministic wait audit
+
+The corrected snippets in Tasks 1–7 use the following ordered protocol; no wait is allowed before its corresponding trigger or gate release:
+
+| Waited condition | Required preceding action |
+| --- | --- |
+| Preparation start | Call `preload(locale)` and wait for `.prepareStarted`. |
+| Preparation failure/result | Release `completePrepare(locale)` first, then wait for `.prepareFailed` or `.prepareFinished`. This includes both failed-preload deduplication tests and the old-A late-failure race. |
+| B residency/publication | After `invalidateSelection(A)`, explicitly call `preload(B)`, wait for B preparation start, call `completePrepare(B)`, then wait for `.resourcePublished(B, _)`. |
+| A release after invalidation | Release A's preparation gate before waiting for the late A result or its `.resourceReleased` event. |
+| Explicit-download publication | Release `completeInstall(locale)`, wait for `.installCompleted`, wait for `.prepareStarted`, call `completePrepare(locale)`, then wait for `.resourcePublished`. |
+| Termination release | First complete preparation and wait for `.resourcePublished`; only then call `releasePreparedResources()` and wait for the release event. |
+| Count/event assertions | Read `await client.snapshot()` or `await probe` accessors into a local value before asserting; no actor property is read synchronously. |
+
+The exact task numbers changed by this audit are **Tasks 1, 2, 3, 4, 5, 6, and 7**, plus the shared harness section before Task 1. Task 7 now explicitly rechecks every Task 1–6 snippet against this gate order.
+
+The actor-backed fake adds these async APIs: `PreloadTestProbe.waitForPrepareRelease(locale:)`, `waitForPrepareCount(_:)`, `waitForReleaseCount(_:)`, `waitForInstallCount(_:)`, `completePrepare(locale:)`, `completeInstall(locale:)`, `preloadRequestLocales()`, `publishedLocales()`, `prepareRequestLocales()`, and `releaseLocales()`; `StubTranscriptionModelClient.completePrepare(locale:)`, `completeInstall(locale:)`, `snapshot() async`, `waitForEvent(_:)`, `waitForPrepareStart(locale:)`, `waitForPrepareCount(_:)`, `waitForPreloadFailure()`, `waitForResidentLocale(_:)`, `waitForLateResult(locale:)`, `waitForReleaseCount(_:)`, `waitForActiveIdentity(_:)`, `waitForInstalledCheck()`, `waitForInstallCount(_:)`, and `waitForInstallCompleted(locale:)`; and the installer seam's `waitForInstallStart(locale:)`, `completeInstall(locale:)`, and `snapshot() async`. `StubSnapshot` contains every value asserted by the snippets, and all reads of those values are performed after `await`.
+
+**Confirmation:** every deterministic wait for publication, failure, residency, or termination release now has a preceding trigger; every A→B test explicitly starts B and releases B's preparation gate before waiting for B residency; every A late result/failure wait follows release of A's gate; and termination tests publish the resident resource before requesting release. No snippet uses sleeps, polling, TODOs, undefined fake APIs, or synchronous actor-backed fake access.
 
 - [ ] **Step 5: Run the complete verification command and inspect its terminal output.**
 
