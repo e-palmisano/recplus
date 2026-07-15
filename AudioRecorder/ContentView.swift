@@ -4,6 +4,9 @@ struct ContentView: View {
     @Bindable var session: RecordingSession
     @State private var store = RecordingStore()
     @State private var selectionID: Recording.ID?
+    @State private var recordingBeingRenamed: Recording?
+    @State private var renameText: String = ""
+    @State private var recordingPendingDelete: Recording?
 
     private var selectedRecording: Recording? {
         selectionID.flatMap { id in store.recordings.first { $0.id == id } }
@@ -24,6 +27,15 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 2)
+                .contextMenu {
+                    Button("Rename…") {
+                        renameText = recording.name
+                        recordingBeingRenamed = recording
+                    }
+                    Button("Delete", role: .destructive) {
+                        recordingPendingDelete = recording
+                    }
+                }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 240)
             .disabled(session.isRecording)
@@ -106,6 +118,36 @@ struct ContentView: View {
             Button("Later", role: .cancel) { session.modelDownloadPromptLocale = nil }
         } message: { locale in
             Text("Live transcription in \(RecordingSession.localeDisplayName(locale)) needs a one-time model download. If you skip it, the download will happen when you start recording.")
+        }
+        .alert(
+            "Rename Recording",
+            isPresented: Binding(
+                get: { recordingBeingRenamed != nil },
+                set: { if !$0 { recordingBeingRenamed = nil } }
+            ),
+            presenting: recordingBeingRenamed
+        ) { recording in
+            TextField("Name", text: $renameText)
+            Button("Save") {
+                try? store.rename(recording, to: renameText)
+                store.refresh()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: { _ in
+            Text("Enter a new name for this recording.")
+        }
+        .alert(
+            "Delete Recording?",
+            isPresented: Binding(
+                get: { recordingPendingDelete != nil },
+                set: { if !$0 { recordingPendingDelete = nil } }
+            ),
+            presenting: recordingPendingDelete
+        ) { recording in
+            Button("Delete", role: .destructive) { delete(recording) }
+            Button("Cancel", role: .cancel) { }
+        } message: { _ in
+            Text("This moves the recording and its transcript to the Trash.")
         }
         .sheet(isPresented: Binding(
             get: { session.isDownloadingModel },
