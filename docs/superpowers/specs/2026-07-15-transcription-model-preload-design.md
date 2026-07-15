@@ -51,8 +51,13 @@ risorsa già residente invece di crearne una seconda.
 1. All'avvio, la lingua selezionata viene normalizzata.
 2. Se il modello corrispondente è già installato, l'app avvia **in asincrono** il
    preload del solo modello selezionato.
-3. Se l'utente completa esplicitamente il download del modello, il preload parte
-   immediatamente senza attendere la prossima registrazione.
+3. Se l'utente completa esplicitamente il download del modello, il coordinatore
+   cattura l'identità normalizzata della selezione corrente prima di avviare il
+   completamento asincrono e la ricontrolla quando il download termina. Il preload
+   viene programmato e il risultato viene pubblicato soltanto se quell'identità è
+   ancora uguale al modello normalizzato attualmente selezionato; se il download
+   è diventato obsoleto, il completamento viene ignorato senza preparare o
+   pubblicare risorse.
 4. Alla registrazione, l'engine riusa il modello/analyzer preparato; se non è
    pronto, il percorso esistente di avvio esegue il setup necessario e, quando
    serve, il download già previsto.
@@ -71,6 +76,14 @@ attende o riusa il risultato della prima, senza creare analyzer o task paralleli
   e una singola operazione di preload attiva.
 - Il task di preload deve essere cancellabile e verificare l'identità del modello
   prima di pubblicare il risultato.
+- Il marker dell'operazione di preload in corso viene rimosso atomicamente su
+  successo, errore e cancellazione soltanto se è ancora il marker della stessa
+  operazione e generazione; un completamento obsoleto non può rimuovere il marker
+  di un'operazione più recente.
+- I chiamanti deduplicati non possono conservare né attendere un task fallito o
+  cancellato diventato obsoleto; una nuova richiesta equivalente può creare una
+  nuova operazione e il percorso di registrazione continua a usare il fallback
+  esistente.
 - Quando cambia modello o lingua, il preload precedente viene invalidato e
   cancellato; le risorse precedenti vengono rilasciate; il nuovo modello viene
   precaricato una sola volta non appena risulta installato.
@@ -79,6 +92,8 @@ attende o riusa il risultato della prima, senza creare analyzer o task paralleli
   e all'uscita dall'app.
 - Un risultato tardivo di un task cancellato non può sostituire il modello della
   selezione corrente.
+- Il completamento di un download esplicito per una selezione non più corrente
+  non prepara né pubblica alcun modello.
 
 ## Errori e fallback
 
@@ -99,6 +114,8 @@ selezione non deve essere trattata come errore utente.
 - Il preload parte asincrono dopo la normalizzazione della lingua all'avvio,
   soltanto quando il modello è già installato.
 - Il preload parte immediatamente dopo ogni download esplicito completato.
+- Un download esplicito completato in modo obsoleto non programma né pubblica
+  preload per la selezione precedente.
 - Nessuna operazione di preload blocca UI, avvio o comandi di registrazione.
 - `TranscriptionEngine` mantiene un solo modello/analyzer preparato e lo riusa
   durante la registrazione e tra stop/start.
@@ -108,6 +125,9 @@ selezione non deve essere trattata come errore utente.
 - Cambio selezione e uscita dall'app rilasciano le risorse residenti.
 - I fallimenti di preload sono silenziosi e il fallback di avvio, incluso il
   download necessario, continua a funzionare.
+- I marker di preload vengono puliti atomicamente per successo, errore e
+  cancellazione con controllo di operazione/generazione; nessun chiamante
+  deduplicato attende un task obsoleto fallito o cancellato.
 
 ## Strategia di test
 
@@ -122,7 +142,11 @@ di UI:
 - cancellazione, rilascio e sostituzione al cambio modello o lingua;
 - rilascio all'uscita dell'app;
 - fallimento non bloccante e fallback di avvio con download necessario;
-- ignoramento dei risultati tardivi di un preload cancellato.
+- ignoramento dei risultati tardivi di un preload cancellato;
+- completamento obsoleto di un download esplicito, verificando che non partano
+  preparazione, pubblicazione o rilascio di risorse per il modello precedente;
+- pulizia atomica del marker su successo, errore e cancellazione, con una nuova
+  richiesta equivalente che non deduplichi su un task fallito o cancellato.
 
 I test devono usare dipendenze sostituibili o stub per download e preparazione,
 così da verificare conteggi, ordine, cancellazione e rilascio senza dipendere da
