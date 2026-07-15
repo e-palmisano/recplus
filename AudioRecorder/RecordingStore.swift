@@ -55,9 +55,6 @@ final class RecordingStore {
         return urls
             .filter { $0.pathExtension == "m4a" }
             .compactMap { url in
-                let baseName = url.deletingPathExtension().lastPathComponent
-                guard let date = RecordingFormat.sessionDate(from: baseName) else { return nil }
-
                 let transcriptURL = url.deletingPathExtension().appendingPathExtension("txt")
                 let hasTranscript = fm.fileExists(atPath: transcriptURL.path)
 
@@ -66,6 +63,16 @@ final class RecordingStore {
                     duration = Double(file.length) / file.processingFormat.sampleRate
                 } else {
                     duration = 0
+                }
+
+                let date: Date
+                guard let attrs = try? fm.attributesOfItem(atPath: url.path) else { return nil }
+                if let creationDate = attrs[.creationDate] as? Date {
+                    date = creationDate
+                } else if let modDate = attrs[.modificationDate] as? Date {
+                    date = modDate
+                } else {
+                    return nil
                 }
 
                 return Recording(

@@ -47,12 +47,23 @@ final class RecordingStoreTests: XCTestCase {
         XCTAssertEqual(recordings[0].duration, 1.0, accuracy: 0.1)
     }
 
-    func testScanIgnoresStrayFilesAndBadNames() throws {
+    func testScanIgnoresNonM4aFiles() throws {
         _ = try writeM4A(named: "not-a-session-name")
         try "x".write(to: tempDir.appendingPathComponent("orphan.txt"), atomically: true, encoding: .utf8)
         try Data().write(to: tempDir.appendingPathComponent("2026-07-13 10-00-00 system.caf"))
 
-        XCTAssertTrue(RecordingStore.scan(directory: tempDir).isEmpty)
+        let recordings = RecordingStore.scan(directory: tempDir)
+        XCTAssertEqual(recordings.count, 1, "only the .m4a should be included")
+        XCTAssertEqual(recordings[0].name, "not-a-session-name")
+    }
+
+    func testScanIncludesCustomNamedM4a() throws {
+        _ = try writeM4A(named: "My Meeting")
+
+        let recordings = RecordingStore.scan(directory: tempDir)
+        XCTAssertEqual(recordings.count, 1)
+        XCTAssertEqual(recordings[0].name, "My Meeting")
+        XCTAssertEqual(recordings[0].date.timeIntervalSinceNow, 0, accuracy: 5)
     }
 
     func testScanOfMissingDirectoryIsEmpty() {
