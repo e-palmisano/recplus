@@ -49,8 +49,11 @@ final class RecordingSession {
 
     private var currentSystemCafURL: URL?
     private var currentMicCafURL: URL?
-    private var currentOutputURL: URL?
-    private var currentTranscriptURL: URL?
+    private var currentBaseName: String?
+    /// Set by the UI right after recording starts (non-blocking naming
+    /// prompt). Consumed once in `stop()`, then left for the next `start()`
+    /// to clear.
+    var desiredRecordingName: String?
     private var systemStartedAt: Date?
     private var micStartedAt: Date?
 
@@ -172,13 +175,12 @@ final class RecordingSession {
         errorMessage = nil
         transcriptLines = []
         pendingTranscriptText = ""
+        desiredRecordingName = nil
 
         let sessionsDir = Self.sessionsDirectory()
         let baseName = RecordingFormat.sessionFolderName(for: Date())
         let systemURL = sessionsDir.appendingPathComponent("\(baseName) system.caf")
         let micURL = sessionsDir.appendingPathComponent("\(baseName) microphone.caf")
-        let outputURL = sessionsDir.appendingPathComponent("\(baseName).m4a")
-        let transcriptURL = sessionsDir.appendingPathComponent("\(baseName).txt")
 
         // Level publishing is time-gated: system-tap buffers can arrive at
         // 100+ Hz, and a MainActor hop per buffer is wasted work — the meter
@@ -218,8 +220,7 @@ final class RecordingSession {
 
             self.currentSystemCafURL = systemURL
             self.currentMicCafURL = micURL
-            self.currentOutputURL = outputURL
-            self.currentTranscriptURL = transcriptURL
+            self.currentBaseName = baseName
             self.systemStartedAt = systemStartedAt
             self.micStartedAt = micStartedAt
         } catch {
@@ -290,10 +291,18 @@ final class RecordingSession {
 
         guard let systemURL = currentSystemCafURL,
               let micURL = currentMicCafURL,
-              let outputURL = currentOutputURL,
-              let transcriptURL = currentTranscriptURL,
+              let baseName = currentBaseName,
               let systemStartedAt,
               let micStartedAt else { return }
+
+        let sessionsDir = Self.sessionsDirectory()
+        let finalBaseName = RecordingNaming.resolveFinalBaseName(
+            desiredName: desiredRecordingName,
+            fallback: baseName,
+            directory: sessionsDir
+        )
+        let outputURL = sessionsDir.appendingPathComponent("\(finalBaseName).m4a")
+        let transcriptURL = sessionsDir.appendingPathComponent("\(finalBaseName).txt")
 
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
