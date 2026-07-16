@@ -50,10 +50,14 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         await harness.installer.completeInstall(locale: "en-US")
         try await waitFor(harness.probe) { if case .installCompleted("en-US") = $0 { return true }; return false }
 
-        let preloadLocales = await harness.probe.preloadRequestLocales()
+        // Per shared-interfaces.md's mandated event ordering, the engine emits
+        // `.preloadRequested` before checking install status, so it fires here
+        // even though "it-IT" is not installed (see the reordered `_preload`).
+        // What this test actually verifies (per its name) is that the stale
+        // selection is never prepared or published — it does not claim
+        // `.preloadRequested` is suppressed for an uninstalled locale.
         let publishedLocales = await harness.probe.publishedLocales()
         let preparedLocales = await harness.probe.prepareRequestLocales()
-        XCTAssertEqual(preloadLocales, [])
         XCTAssertEqual(publishedLocales, [])
         XCTAssertEqual(preparedLocales, [])
     }

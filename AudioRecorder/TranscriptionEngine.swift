@@ -416,37 +416,40 @@ final class TranscriptionEngine: @unchecked Sendable {
             return
         }
 
-        // Step 0: Check if installed FIRST (before recording preload request)
-        let installed = await modelClient.isInstalled(locale: normalized)
-        guard installed else {
-            // Not installed: silently return without recording preload request
-            return
-        }
-
-        // Record that preload was requested (only for installed models)
-        await modelClient.recordPreloadRequested(locale: normalized)
-
-        // Create a marker for this operation (stored for Task 2 deduplication)
+        // Check if an equivalent operation is already in flight, before
+        // committing to a new marker.
         let marker = PreloadOperationMarker(
             operationID: UUID(),
             generation: selectionGeneration,
             localeIdentifier: normalized.identifier
         )
-
-        // Check if an equivalent operation is already in flight
         if let existingMarker = preloadMarker,
            existingMarker.localeIdentifier == normalized.identifier {
             // Equivalent concurrent request: don't create a new task, just return
             return
         }
 
-        // Store the marker (uniquely identifies this operation)
+        // Install the marker, then emit .preloadRequested — per the shared
+        // engine/test-seam contract, the marker is live and the request is
+        // recorded before the installed check runs.
         preloadMarker = marker
         let capturedMarker = marker
         let capturedGeneration = selectionGeneration
 
+        await modelClient.recordPreloadRequested(locale: normalized)
+
+        let installed = await modelClient.isInstalled(locale: normalized)
+        guard installed else {
+            // Not installed: silently return. Clear the marker only if it
+            // still matches (a newer operation may already have replaced it).
+            if preloadMarker == capturedMarker && selectionGeneration == capturedGeneration {
+                preloadMarker = nil
+            }
+            return
+        }
+
         do {
-            // Step 1: Model is definitely installed (we checked above), now prepare it
+            // Model is confirmed installed; now prepare it.
 
             // Step 2: Check for cancellation before preparation
             try Task.checkCancellation()
