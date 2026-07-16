@@ -96,10 +96,18 @@ final class TranscriptionModelPreloadTests: XCTestCase {
             if case .prepareFinished("en-US", _) = event { return true }
             return false
         }
-        try await client.waitForReleaseCount(1)
+        // No `.resourceReleased` is expected here: the cancelled first
+        // operation throws `CancellationError` inside `prepare()` before it
+        // ever constructs a `PreparedTranscriptionModel`, so there is never a
+        // resident/prepared value from it to release. `invalidateSelection`
+        // also finds no resident model yet at the moment it runs. The real
+        // assertion for "does not await stale task" is that the second,
+        // fresh operation completes and becomes resident on its own.
+        try await client.waitForResidentLocale("en-US")
 
         let snapshot = await client.snapshot()
         XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
     }
 }
 
