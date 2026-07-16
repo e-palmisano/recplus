@@ -178,6 +178,12 @@ final class RecordingSession {
         selectedTranscriptionLocaleID = id
     }
 
+    /// Releases the transcription engine's prepared resources.
+    /// Called on application termination via `NSApplication.willTerminateNotification`.
+    func releaseTranscriptionResources() {
+        transcriptionEngine.releasePreparedResources()
+    }
+
     /// Downloads the transcription model for `locale`, driving
     /// `isDownloadingModel`/`modelDownloadProgress` (shown as a progress
     /// sheet). Errors land in `errorMessage`; `TranscriptionEngine.start`

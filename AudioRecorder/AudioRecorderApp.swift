@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Foundation
 
 @main
 struct AudioRecorderApp: App {
@@ -8,6 +9,9 @@ struct AudioRecorderApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(session: session)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    session.releaseTranscriptionResources()
+                }
         }
         .commands {
             CommandMenu("Recording") {

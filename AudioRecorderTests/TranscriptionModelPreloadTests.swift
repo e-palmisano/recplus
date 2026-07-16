@@ -332,6 +332,221 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
         XCTAssertNil(engine.inFlightPreloadLocaleForTesting)
     }
+
+    // MARK: - Acceptance Tests (covering all approved lifecycle behaviors)
+
+    func testCachedLaunchPreloadsOnlySelectedNormalizedLocale() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en_US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("en-US", _) = event { return true }
+            return false
+        }
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareLocales, ["en-US"])
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
+    }
+
+    func testUninstalledSelectionDoesNotTriggerPreload() async throws {
+        let client = StubTranscriptionModelClient(installed: [])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+        try await client.waitForInstalledCheck()
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareCounts["it-IT"] ?? 0, 0)
+        XCTAssertEqual(snapshot.installCount, 0)
+    }
+
+    func testSuccessfulExplicitDownloadPreloadsImmediately() async throws {
+        let harness = makeSessionHarness(selectedID: "it-IT", normalized: "it-IT", installed: false)
+        harness.session.downloadModel(for: Locale(identifier: "it-IT"))
+        try await harness.installer.waitForInstallStart(locale: "it-IT")
+        await harness.installer.completeInstall(locale: "it-IT")
+        try await waitFor(harness.probe) { if case .installCompleted("it-IT") = $0 { return true }; return false }
+        try await waitFor(harness.probe) { if case .preloadRequested("it-IT") = $0 { return true }; return false }
+        try await waitFor(harness.probe) { if case .prepareStarted("it-IT", _) = $0 { return true }; return false }
+        await harness.probe.completePrepare(locale: "it-IT")
+        try await waitFor(harness.probe) { if case .resourcePublished("it-IT", _) = $0 { return true }; return false }
+        let preloadLocales = await harness.probe.preloadRequestLocales()
+        XCTAssertEqual(preloadLocales, ["it-IT"])
+    }
+
+    func testEquivalentRequestsAreDeduplicated() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en_US"))
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForResidentLocale("en-US")
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareCounts["en-US"], 1)
+    }
+
+    func testRecordingStartReusesPreparedModel() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("en-US", _) = event { return true }
+            return false
+        }
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        let initialSnapshot = await client.snapshot()
+        let preparedIdentity = initialSnapshot.preparedIdentity
+        try await client.waitForActiveIdentity(preparedIdentity)
+        let recordingSnapshot = await client.snapshot()
+        XCTAssertEqual(recordingSnapshot.prepareCounts["en-US"], 1)
+        XCTAssertEqual(engine.activePreparedIdentityForTesting, preparedIdentity)
+        _ = engine.stop()
+    }
+
+    func testStopStartRetainsPreparedModel() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("en-US", _) = event { return true }
+            return false
+        }
+        let preparedSnapshot = await client.snapshot()
+        let identity = try XCTUnwrap(preparedSnapshot.preparedIdentity)
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForActiveIdentity(identity)
+        _ = engine.stop()
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForActiveIdentity(identity)
+        let retainedSnapshot = await client.snapshot()
+        XCTAssertTrue(retainedSnapshot.releaseLocales.isEmpty)
+        XCTAssertEqual(engine.activePreparedIdentityForTesting, identity)
+        _ = engine.stop()
+    }
+
+    func testSelectionSwapCancelsReleasesAndReplacesModel() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareStart(locale: "en-US")
+        engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+        engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+        try await client.waitForPrepareStart(locale: "it-IT")
+        await client.completePrepare(locale: "it-IT")
+        try await client.waitForResidentLocale("it-IT")
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForReleaseCount(1)
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareLocales, ["en-US", "it-IT"])
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
+        XCTAssertEqual(snapshot.releaseLocales, ["en-US"])
+    }
+
+    func testLateCancelledResultIsIgnored() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")], ignoreCancellation: true)
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareStart(locale: "en-US")
+        engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+        engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+        try await client.waitForPrepareStart(locale: "it-IT")
+        await client.completePrepare(locale: "it-IT")
+        try await client.waitForResidentLocale("it-IT")
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForLateResult(locale: "en-US")
+        try await client.waitForReleaseCount(1)
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
+        XCTAssertNil(engine.inFlightPreloadLocaleForTesting)
+    }
+
+    func testPreloadFailureIsSilentAndRecordingFallbackInstallsAtStart() async throws {
+        let client = StubTranscriptionModelClient(installed: [], prepareError: StubError.prepare)
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForInstalledCheck()
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForInstallCount(1)
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.setupFailureCount, 0)
+        XCTAssertEqual(snapshot.installCount, 1)
+    }
+
+    func testTerminationReleasesResidentResources() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForResidentLocale("en-US")
+        engine.releasePreparedResources()
+        engine.releasePreparedResources()
+        try await client.waitForReleaseCount(1)
+        let releaseSnapshot = await client.snapshot()
+        XCTAssertEqual(releaseSnapshot.releaseLocales.count, 1)
+        XCTAssertNil(engine.preparedLocaleForTesting)
+    }
+
+    func testStaleDownloadCompletionNeverPreloadsPreviousSelection() async throws {
+        let harness = makeSessionHarness(selectedID: "en-US", normalized: "en-US", installed: false)
+        harness.session.downloadModel(for: Locale(identifier: "en-US"))
+        try await harness.installer.waitForInstallStart(locale: "en-US")
+        harness.session.selectTranscriptionLocale(id: "it-IT")
+        await harness.installer.completeInstall(locale: "en-US")
+        try await harness.installer.waitForInstallCompleted(locale: "en-US")
+
+        let preloadLocales = await harness.probe.preloadRequestLocales()
+        let preparedLocales = await harness.probe.prepareRequestLocales()
+        let publishedLocales = await harness.probe.publishedLocales()
+        XCTAssertEqual(preloadLocales, [])
+        XCTAssertEqual(preparedLocales, [])
+        XCTAssertEqual(publishedLocales, [])
+    }
+
+    func testFailedOrCancelledPreloadMarkerIsNotReusedByDeduplicatedCaller() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")], prepareErrors: [.prepare, nil])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForPreloadFailure()
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(2)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForResidentLocale("en-US")
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
+        XCTAssertFalse(engine.hasInFlightPreloadForTesting)
+    }
+
+    func testSessionTerminationHookReleasesEngineResources() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        let session = makeInjectedSession(engine: engine, selectedID: "en-US")
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("en-US", _) = event { return true }
+            return false
+        }
+
+        session.releaseTranscriptionResources()
+        try await client.waitForReleaseCount(1)
+        XCTAssertNil(engine.preparedLocaleForTesting)
+    }
+}
+
+@MainActor
+func makeInjectedSession(engine: TranscriptionEngine, selectedID: String) -> RecordingSession {
+    let resolver = FixedLocaleResolver()
+    let installer = GatedModelInstaller(probe: PreloadTestProbe(), normalized: selectedID, installed: true)
+    return RecordingSession(transcriptionEngine: engine, localeResolver: resolver, modelInstaller: installer, selectedID: selectedID)
 }
 
 // MARK: - Test Helpers
@@ -402,6 +617,10 @@ final class GatedModelInstaller: @unchecked Sendable, TranscriptionModelInstalli
 
     func completeInstall(locale: String) async {
         await client.completeInstall(locale: locale)
+    }
+
+    func waitForInstallCompleted(locale: String) async throws {
+        try await client.waitForInstallCompleted(locale: locale)
     }
 
     func snapshot() async -> InstallerSnapshot {

@@ -552,6 +552,7 @@ final class TranscriptionEngine: @unchecked Sendable {
     var preparedLocaleForTesting: Locale? { preparedModel?.locale }
     var activePreparedIdentityForTesting: UUID? { activeRecordingPreparedModel?.identity }
     var inFlightPreloadLocaleForTesting: String? { preloadMarker?.localeIdentifier }
+    var hasInFlightPreloadForTesting: Bool { preloadMarker != nil }
     #endif
 }
 
