@@ -1,8 +1,63 @@
 import XCTest
 @testable import AudioRecorder
 
+// MARK: - Test Harness
+
+struct SessionHarness {
+    let session: RecordingSession
+    let probe: PreloadTestProbe
+    let installer: GatedModelInstaller
+}
+
 @MainActor
 final class TranscriptionModelPreloadTests: XCTestCase {
+    // MARK: - Coordinator Tests
+
+    func testNormalizedLaunchSelectionPreloadsOnlyResolvedInstalledLocale() async throws {
+        let harness = makeSessionHarness(selectedID: "en_US", normalized: "en-US", installed: true)
+        harness.session.preloadSelectedModelAfterNormalization()
+        try await waitFor(harness.probe) { if case .preloadRequested("en-US") = $0 { return true }; return false }
+        let preloadLocales = await harness.probe.preloadRequestLocales()
+        XCTAssertEqual(preloadLocales, ["en-US"])
+    }
+
+    func testSuccessfulExplicitDownloadStartsPreloadImmediately() async throws {
+        let harness = makeSessionHarness(selectedID: "it-IT", normalized: "it-IT", installed: false)
+        harness.session.downloadModel(for: Locale(identifier: "it-IT"))
+        try await harness.installer.waitForInstallStart(locale: "it-IT")
+        await harness.installer.completeInstall(locale: "it-IT")
+        try await waitFor(harness.probe) { if case .installCompleted("it-IT") = $0 { return true }; return false }
+        try await waitFor(harness.probe) { if case .preloadRequested("it-IT") = $0 { return true }; return false }
+        try await waitFor(harness.probe) { if case .prepareStarted("it-IT", _) = $0 { return true }; return false }
+        await harness.probe.completePrepare(locale: "it-IT")
+        try await waitFor(harness.probe) { if case .resourcePublished("it-IT", _) = $0 { return true }; return false }
+        let installerSnapshot = await harness.installer.snapshot()
+        let preloadLocales = await harness.probe.preloadRequestLocales()
+        XCTAssertEqual(installerSnapshot.installCount, 1)
+        XCTAssertEqual(preloadLocales, ["it-IT"])
+    }
+
+    func testStaleExplicitDownloadCompletionDoesNotPrepareOrPublishOldSelection() async throws {
+        let harness = makeSessionHarness(
+            selectedID: "en-US",
+            normalized: "en-US",
+            installed: false,
+        )
+
+        harness.session.downloadModel(for: Locale(identifier: "en-US"))
+        try await harness.installer.waitForInstallStart(locale: "en-US")
+        harness.session.selectTranscriptionLocale(id: "it-IT")
+        await harness.installer.completeInstall(locale: "en-US")
+        try await waitFor(harness.probe) { if case .installCompleted("en-US") = $0 { return true }; return false }
+
+        let preloadLocales = await harness.probe.preloadRequestLocales()
+        let publishedLocales = await harness.probe.publishedLocales()
+        let preparedLocales = await harness.probe.prepareRequestLocales()
+        XCTAssertEqual(preloadLocales, [])
+        XCTAssertEqual(publishedLocales, [])
+        XCTAssertEqual(preparedLocales, [])
+    }
+
     func testPreloadOfInstalledSelectedLocalePreparesExactlyOneResidentModel() async throws {
         let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
         let engine = makeEngine(client: client)
@@ -164,6 +219,70 @@ private func makeEngine(client: any TranscriptionModelClient) -> TranscriptionEn
         onPendingTextChanged: { _ in },
         onSetupFailed: { _ in }
     )
+}
+
+@MainActor
+func makeSessionHarness(selectedID: String, normalized: String, installed: Bool) -> SessionHarness {
+    let probe = PreloadTestProbe()
+    let installer = GatedModelInstaller(probe: probe, normalized: normalized, installed: installed)
+    let engine = makeEngine(client: installer.client)
+    let session = RecordingSession(
+        transcriptionEngine: engine,
+        localeResolver: installer.localeResolver,
+        modelInstaller: installer,
+        selectedID: selectedID
+    )
+    return SessionHarness(session: session, probe: probe, installer: installer)
+}
+
+// MARK: - Test Doubles
+
+struct FixedLocaleResolver: Sendable, TranscriptionLocaleResolving {
+    func normalizedLocale(for identifier: String) async -> Locale? {
+        // Simply normalize the identifier by replacing underscores with hyphens
+        let normalized = identifier.replacingOccurrences(of: "_", with: "-")
+        return Locale(identifier: normalized)
+    }
+}
+
+struct InstallerSnapshot: Sendable {
+    let installCount: Int
+}
+
+final class GatedModelInstaller: @unchecked Sendable, TranscriptionModelInstalling {
+    let client: StubTranscriptionModelClient
+    let localeResolver: FixedLocaleResolver
+    private let probe: PreloadTestProbe
+    private let normalizedID: String
+    private var isInstalledValue: Bool
+
+    init(probe: PreloadTestProbe, normalized: String, installed: Bool) {
+        self.probe = probe
+        self.normalizedID = normalized
+        self.isInstalledValue = installed
+        self.localeResolver = FixedLocaleResolver()
+        self.client = StubTranscriptionModelClient(
+            installed: installed ? [Locale(identifier: normalized)] : [],
+            probe: probe
+        )
+    }
+
+    func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        try await client.install(locale: locale, onProgress: onProgress)
+    }
+
+    func waitForInstallStart(locale: String) async throws {
+        try await client.waitForEvent { if case .installStarted(locale) = $0 { return true }; return false }
+    }
+
+    func completeInstall(locale: String) async {
+        await client.completeInstall(locale: locale)
+    }
+
+    func snapshot() async -> InstallerSnapshot {
+        let snap = await client.snapshot()
+        return InstallerSnapshot(installCount: snap.installCount)
+    }
 }
 
 // MARK: - Test Probe and Stub Implementation

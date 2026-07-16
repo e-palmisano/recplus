@@ -29,7 +29,13 @@ final class RecordingSession {
         didSet {
             guard selectedTranscriptionLocaleID != oldValue else { return }
             UserDefaults.standard.set(selectedTranscriptionLocaleID, forKey: Self.transcriptionLocaleKey)
-            promptModelDownloadIfNeeded()
+            selectionGeneration += 1
+
+            // Invalidate the previous selection and preload the new one if installed
+            transcriptionEngine.invalidateSelection(preferredLocale: Locale(identifier: oldValue))
+            Task { [weak self] in
+                await self?.preloadSelectedModelAfterNormalization()
+            }
         }
     }
     private(set) var transcriptLines: [TranscriptLine] = []
@@ -57,6 +63,11 @@ final class RecordingSession {
     private var systemStartedAt: Date?
     private var micStartedAt: Date?
 
+    // Selection/preload state
+    private var selectionGeneration = 0
+    private let localeResolver: any TranscriptionLocaleResolving
+    private let modelInstaller: any TranscriptionModelInstalling
+
     // `lazy`: the closures below capture `self`, which isn't yet fully
     // initialized at the point a plain stored-property initializer would run.
     // Deferring construction to first access (inside `start()`, well after
@@ -80,9 +91,25 @@ final class RecordingSession {
 
     private static let transcriptionLocaleKey = "transcriptionLocaleIdentifier"
 
+    /// Test-only initializer for injecting dependencies
+    init(
+        transcriptionEngine: TranscriptionEngine,
+        localeResolver: any TranscriptionLocaleResolving,
+        modelInstaller: any TranscriptionModelInstalling,
+        selectedID: String
+    ) {
+        self.selectedTranscriptionLocaleID = selectedID
+        self.localeResolver = localeResolver
+        self.modelInstaller = modelInstaller
+        self.transcriptionEngine = transcriptionEngine
+        refreshMics()
+    }
+
     init() {
         selectedTranscriptionLocaleID = UserDefaults.standard.string(forKey: Self.transcriptionLocaleKey)
             ?? Locale.current.identifier
+        self.localeResolver = ProductionLocaleResolver()
+        self.modelInstaller = ProductionModelInstaller()
         refreshMics()
         Task { [weak self] in
             let locales = await SpeechTranscriber.supportedLocales
@@ -100,6 +127,8 @@ final class RecordingSession {
                     self.selectedTranscriptionLocaleID = resolved
                 }
             }
+            // After normalization, preload the initial selected model if installed
+            await self?.preloadSelectedModelAfterNormalization()
         }
     }
 
@@ -120,37 +149,74 @@ final class RecordingSession {
         }
     }
 
+    /// Preloads the currently-selected transcription model after normalizing
+    /// its locale identifier through the framework. Called once after initial
+    /// locale normalization in `init()` and whenever the selection changes.
+    /// The engine's preload method checks if the model is installed; if not,
+    /// it silently returns without preparing.
+    func preloadSelectedModelAfterNormalization() {
+        let selectedID = selectedTranscriptionLocaleID
+        let currentGeneration = selectionGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            // Normalize the selected identifier
+            let normalized = await self.localeResolver.normalizedLocale(for: selectedID)
+            guard let normalized else { return }
+
+            // Check if the selection has changed while we were normalizing
+            guard self.selectedTranscriptionLocaleID == selectedID && self.selectionGeneration == currentGeneration else {
+                return
+            }
+
+            // Ask engine to preload; it will check installation internally
+            self.transcriptionEngine.preload(preferredLocale: normalized)
+        }
+    }
+
+    /// Exposed for testing: allow explicit locale selection
+    func selectTranscriptionLocale(id: String) {
+        selectedTranscriptionLocaleID = id
+    }
+
     /// Downloads the transcription model for `locale`, driving
     /// `isDownloadingModel`/`modelDownloadProgress` (shown as a progress
     /// sheet). Errors land in `errorMessage`; `TranscriptionEngine.start`
     /// keeps its own install path as a fallback, so a failed or cancelled
     /// download here just means the download happens at record time instead.
+    /// After successful installation, preload the model if the selection
+    /// hasn't changed.
     func downloadModel(for locale: Locale) {
         modelDownloadPromptLocale = nil
         guard !isDownloadingModel else { return }
         isDownloadingModel = true
         modelDownloadProgress = 0
 
+        // Capture the current selection identity before the first await
+        let selectedAtStart = selectedTranscriptionLocaleID
+        let generationAtStart = selectionGeneration
+
         Task { [weak self] in
             do {
-                let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
-                if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                    let observation = request.progress.observe(\.fractionCompleted) { progress, _ in
-                        let fraction = progress.fractionCompleted
-                        Task { @MainActor [weak self] in
-                            guard let self else { return }
-                            // KVO can fire very frequently; only publish
-                            // visible increments to keep the UI quiet.
-                            if fraction - self.modelDownloadProgress >= 0.01 || fraction >= 1.0 {
-                                self.modelDownloadProgress = fraction
-                            }
+                try await self?.modelInstaller.install(locale: locale, onProgress: { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        // KVO can fire very frequently; only publish
+                        // visible increments to keep the UI quiet.
+                        if progress - self.modelDownloadProgress >= 0.01 || progress >= 1.0 {
+                            self.modelDownloadProgress = progress
                         }
                     }
-                    try await request.downloadAndInstall()
-                    observation.invalidate()
+                })
+
+                // Installation succeeded. Check if selection has changed.
+                guard let self else { return }
+                if self.selectedTranscriptionLocaleID == selectedAtStart && self.selectionGeneration == generationAtStart {
+                    // Selection still matches; preload the newly-installed model
+                    self.transcriptionEngine.preload(preferredLocale: locale)
                 }
-                self?.isDownloadingModel = false
-                self?.modelDownloadProgress = 1.0
+
+                self.isDownloadingModel = false
+                self.modelDownloadProgress = 1.0
             } catch {
                 self?.isDownloadingModel = false
                 self?.errorMessage = "Model download failed: \(error.localizedDescription)"
@@ -328,5 +394,27 @@ final class RecordingSession {
 
     private static func sessionsDirectory() -> URL {
         RecordingStore.defaultDirectory
+    }
+}
+
+// MARK: - Production Implementations
+
+struct ProductionLocaleResolver: TranscriptionLocaleResolving {
+    func normalizedLocale(for identifier: String) async -> Locale? {
+        await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: identifier))
+    }
+}
+
+struct ProductionModelInstaller: TranscriptionModelInstalling {
+    func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [])
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            let observation = request.progress.observe(\.fractionCompleted) { progress, _ in
+                onProgress(progress.fractionCompleted)
+            }
+            try await request.downloadAndInstall()
+            observation.invalidate()
+        }
+        onProgress(1.0)
     }
 }

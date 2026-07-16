@@ -8,6 +8,18 @@ enum TranscriptionSetupError: Error {
     case noAudioFormat
 }
 
+// MARK: - Public Coordinator Protocols
+
+protocol TranscriptionLocaleResolving: Sendable {
+    func normalizedLocale(for identifier: String) async -> Locale?
+}
+
+protocol TranscriptionModelInstalling: Sendable {
+    func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws
+}
+
+// MARK: - Internal Model Client
+
 protocol TranscriptionModelClient: Sendable {
     func normalizedLocale(for preferredLocale: Locale) async -> Locale?
     func isInstalled(locale: Locale) async -> Bool
@@ -404,7 +416,14 @@ final class TranscriptionEngine: @unchecked Sendable {
             return
         }
 
-        // Record that preload was requested
+        // Step 0: Check if installed FIRST (before recording preload request)
+        let installed = await modelClient.isInstalled(locale: normalized)
+        guard installed else {
+            // Not installed: silently return without recording preload request
+            return
+        }
+
+        // Record that preload was requested (only for installed models)
         await modelClient.recordPreloadRequested(locale: normalized)
 
         // Create a marker for this operation (stored for Task 2 deduplication)
@@ -427,16 +446,7 @@ final class TranscriptionEngine: @unchecked Sendable {
         let capturedGeneration = selectionGeneration
 
         do {
-            // Step 1: Check if installed (installed-only preload)
-            let installed = await modelClient.isInstalled(locale: normalized)
-            guard installed else {
-                // Not installed: silently return without preparing
-                // Cleanup: clear marker only if it still matches
-                if preloadMarker == capturedMarker && selectionGeneration == capturedGeneration {
-                    preloadMarker = nil
-                }
-                return
-            }
+            // Step 1: Model is definitely installed (we checked above), now prepare it
 
             // Step 2: Check for cancellation before preparation
             try Task.checkCancellation()

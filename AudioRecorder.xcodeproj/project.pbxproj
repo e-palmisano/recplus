@@ -41,6 +41,7 @@
 		D65B3F672BEAF77DBCAA7543 /* TranscriptWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B25BE6218E176D73C2613262 /* TranscriptWriter.swift */; };
 		E069A18C1C62C4DFC1540C18 /* RecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1358C489F2BD0FB8FD1223F7 /* RecorderView.swift */; };
 		F2EA0732B724B5B82A00AAD1 /* Formatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6544276335F8088C9A798A5E /* Formatting.swift */; };
+		F897460CADFCB135C9CDAEF4 /* TranscriptionModelPreloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B86E3C714D6ED80830EBB665 /* TranscriptionModelPreloadTests.swift */; };
 		F8C3F6F84F0ACD3AD1DA1990 /* MicRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F901BD8EA3ED4142A46B1B13 /* MicRecorder.swift */; };
 		F984E9F532658D5DE927B11C /* PlaybackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35FF5E42D79B206754872B12 /* PlaybackView.swift */; };
 /* End PBXBuildFile section */
@@ -81,6 +82,7 @@
 		B25BE6218E176D73C2613262 /* TranscriptWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptWriter.swift; sourceTree = "<group>"; };
 		B6DB08BDF2C923D434425182 /* RecordControlState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordControlState.swift; sourceTree = "<group>"; };
 		B855BAE7B0E191D9009BDC15 /* RecordControlCluster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordControlCluster.swift; sourceTree = "<group>"; };
+		B86E3C714D6ED80830EBB665 /* TranscriptionModelPreloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionModelPreloadTests.swift; sourceTree = "<group>"; };
 		B9B7BB28C2B9F080AA238CCA /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		B9D5024D26C9F3DE33CA9B67 /* SystemAudioTap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioTap.swift; sourceTree = "<group>"; };
 		BC9E39A092BA64551D13BC06 /* LevelMeterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LevelMeterView.swift; sourceTree = "<group>"; };
@@ -110,6 +112,7 @@
 				C0BB0BA5FC3C80A5F9D3841F /* RecordControlStateTests.swift */,
 				0A9D2DE6E5442CFF11780538 /* RecordingNamingTests.swift */,
 				1DC2C9F561B128F06A6B2D20 /* RecordingStoreTests.swift */,
+				B86E3C714D6ED80830EBB665 /* TranscriptionModelPreloadTests.swift */,
 				AD719396B9C5A26C0E652380 /* TranscriptWriterTests.swift */,
 			);
 			path = AudioRecorderTests;
@@ -267,6 +270,7 @@
 				76C4A83F42F74A01A4C31F73 /* RecordingNamingTests.swift in Sources */,
 				400D437D73A60145E6318F57 /* RecordingStoreTests.swift in Sources */,
 				21F718F4CFA1B25B2744B40E /* TranscriptWriterTests.swift in Sources */,
+				F897460CADFCB135C9CDAEF4 /* TranscriptionModelPreloadTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
