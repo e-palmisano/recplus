@@ -430,7 +430,15 @@ final class TranscriptionModelPreloadTests: XCTestCase {
     }
 
     func testSelectionSwapCancelsReleasesAndReplacesModel() async throws {
-        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")])
+        // ignoreCancellation: true — the old (en-US) operation's prepare()
+        // must actually complete and produce a value for this test to
+        // observe a release; a cancellation-aware prepare() would throw
+        // before ever constructing one, making the .resourceReleased
+        // assertion below structurally unreachable (this test's own name
+        // promises release behavior, so the fix is to make that path
+        // reachable, not to relax the assertion — same underlying pattern
+        // as the plan's Task 2 equivalent, which uses this exact flag).
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")], ignoreCancellation: true)
         let engine = makeEngine(client: client)
         engine.preload(preferredLocale: Locale(identifier: "en-US"))
         try await client.waitForPrepareStart(locale: "en-US")
@@ -499,12 +507,23 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         await harness.installer.completeInstall(locale: "en-US")
         try await harness.installer.waitForInstallCompleted(locale: "en-US")
 
+        // The test's name (and downloadModel's own stale-identity guard) is
+        // about "en-US" — the PREVIOUS, now-superseded selection — never
+        // being prepared/published/preload-requested off the back of the
+        // stale download completion. It does not claim the NEW selection
+        // ("it-IT") gets no preload activity of its own: RecordingSession's
+        // selection didSet always asks the engine to preload the new
+        // selection (letting the engine's own isInstalled check decide
+        // whether to actually prepare), so `.preloadRequested("it-IT")` is
+        // legitimate, unrelated activity — not what this test verifies, and
+        // this test doesn't wait for it, so asserting its presence/absence
+        // here would be a timing-dependent assertion on unrelated activity.
         let preloadLocales = await harness.probe.preloadRequestLocales()
         let preparedLocales = await harness.probe.prepareRequestLocales()
         let publishedLocales = await harness.probe.publishedLocales()
-        XCTAssertEqual(preloadLocales, [])
-        XCTAssertEqual(preparedLocales, [])
-        XCTAssertEqual(publishedLocales, [])
+        XCTAssertFalse(preloadLocales.contains("en-US"))
+        XCTAssertFalse(preparedLocales.contains("en-US"))
+        XCTAssertFalse(publishedLocales.contains("en-US"))
     }
 
     func testFailedOrCancelledPreloadMarkerIsNotReusedByDeduplicatedCaller() async throws {
