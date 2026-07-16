@@ -211,6 +211,127 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         XCTAssertEqual(snapshot.installCount, 1)
         XCTAssertEqual(snapshot.setupFailureCount, 0)
     }
+
+
+    func testSelectionSwapCancelsOldPreloadReleasesOldModelAndPreparesNewModelOnce() async throws {
+        let client = StubTranscriptionModelClient(
+            installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")],
+            ignoreCancellation: true
+        )
+        let engine = makeEngine(client: client)
+
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareStart(locale: "en-US")
+        engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+        engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+        try await client.waitForPrepareStart(locale: "it-IT")
+        // Release both to allow them to proceed
+        await client.completePrepare(locale: "it-IT")
+        await client.completePrepare(locale: "en-US")
+        // Wait for it-IT to publish (succeeds, becomes resident)
+        try await client.waitForResidentLocale("it-IT")
+        // en-US should eventually complete and be released since it's late
+        try await client.waitForLateResult(locale: "en-US")
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareLocales, ["en-US", "it-IT"])
+        XCTAssertEqual(snapshot.releaseLocales, ["en-US"])
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
+    }
+
+    func testCancelledPreloadLateResultCannotReplaceCurrentSelection() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")], ignoreCancellation: true)
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareStart(locale: "en-US")
+        engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+        engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+        try await client.waitForPrepareStart(locale: "it-IT")
+        // Release both gates to allow processing to proceed
+        await client.completePrepare(locale: "it-IT")
+        await client.completePrepare(locale: "en-US")
+        // Wait for it-IT publication (should succeed first)
+        try await client.waitForResidentLocale("it-IT")
+        // en-US should be released as a late result
+        try await client.waitForLateResult(locale: "en-US")
+
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.releaseLocales.filter { $0 == "en-US" }.count, 1)
+    }
+
+    func testApplicationTerminationReleasesResidentPreparedModel() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("en-US", _) = event { return true }
+            return false
+        }
+        engine.releasePreparedResources()
+        try await client.waitForReleaseCount(1)
+
+        XCTAssertNil(engine.preparedLocaleForTesting)
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.releaseLocales, ["en-US"])
+    }
+
+    func testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording() async throws {
+        let client = StubTranscriptionModelClient(
+            installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")],
+            probe: PreloadTestProbe(),
+            ignoreCancellation: true,
+            failPrepareFor: ["en-US"]
+        )
+        let engine = makeEngine(client: client)
+
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForEvent { event in
+            if case .prepareStarted("en-US", _) = event { return true }
+            return false
+        }
+        engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+        engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+        try await client.waitForEvent { event in
+            if case .prepareStarted("it-IT", _) = event { return true }
+            return false
+        }
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareCounts["it-IT"], 1)
+        XCTAssertEqual(engine.inFlightPreloadLocaleForTesting, "it-IT")
+
+        // Release it-IT first to complete successfully
+        await client.completePrepare(locale: "it-IT")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("it-IT", _) = event { return true }
+            return false
+        }
+
+        // it-IT should now be the resident model
+        engine.start(preferredLocale: Locale(identifier: "it-IT"), onDownloadProgress: { _ in })
+        try await client.waitForEvent { event in
+            if case .recordingStarted("it-IT", _) = event { return true }
+            return false
+        }
+        let recordingSnapshot = await client.snapshot()
+        XCTAssertEqual(recordingSnapshot.recordingStartedLocales, ["it-IT"])
+
+        // Now release en-US gate - it will fail
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .prepareFailed("en-US", _) = event { return true }
+            return false
+        }
+
+        // After en-US fails, verify that it-IT marker/state is still intact
+        let publishedSnapshot = await client.snapshot()
+        XCTAssertEqual(publishedSnapshot.prepareCounts["it-IT"], 1)
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
+        XCTAssertNil(engine.inFlightPreloadLocaleForTesting)
+    }
 }
 
 // MARK: - Test Helpers

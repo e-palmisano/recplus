@@ -495,7 +495,10 @@ final class TranscriptionEngine: @unchecked Sendable {
     /// Invalidates the previously selected locale, cancels any in-flight preload,
     /// releases the resident prepared resource, and advances the selection generation
     /// so any newly-arriving results are ignored.
-    /// Does not start a new preload.
+    /// Does not start a new preload. The old operation's cleanup will check
+    /// marker/generation before clearing shared state; this method only cancels
+    /// the task and increments generation, leaving the marker for the old
+    /// operation's terminal path to clean up only if marker/generation still match.
     func invalidateSelection(preferredLocale: Locale) {
         preloadTask?.cancel()
         preloadTask = nil
@@ -508,13 +511,16 @@ final class TranscriptionEngine: @unchecked Sendable {
                 await modelClient.release(model)
             }
         }
-
-        preloadMarker = nil
     }
 
-    /// Releases the resident prepared model without invalidating the selection.
-    /// Used during app termination to clean up resources.
+    /// Releases the resident prepared model and cancels any in-flight preload.
+    /// Used during app termination to clean up resources. Idempotent: repeated
+    /// calls are no-ops.
     func releasePreparedResources() {
+        preloadTask?.cancel()
+        preloadTask = nil
+        selectionGeneration += 1
+
         if let model = preparedModel {
             preparedModel = nil
             activePreparedLocale = nil
