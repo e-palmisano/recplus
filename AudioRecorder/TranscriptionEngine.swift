@@ -147,40 +147,64 @@ final class TranscriptionEngine: @unchecked Sendable {
         feedTask = Task {
             do {
                 guard SpeechTranscriber.isAvailable else { throw TranscriptionSetupError.notAvailable }
-                guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: preferredLocale) else {
+                guard let locale = await modelClient.normalizedLocale(for: preferredLocale) else {
                     throw TranscriptionSetupError.localeNotSupported
                 }
-                try await AssetInventory.reserve(locale: locale)
-                reservedLocale = locale
 
-                let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
-                self.transcriber = transcriber
+                // Check if we have a resident prepared model for this locale
+                if let resident = preparedModel, resident.locale == locale {
+                    // We have a resident model - reuse its identity and reservation
+                    activeRecordingPreparedModel = resident
+                    reservedLocale = resident.reservedLocale
 
-                // Asset install must come FIRST: `bestAvailableAudioFormat`
-                // reads the model's sampling rates, so on a machine where the
-                // locale's asset isn't installed yet it fails ("No GeneralASR
-                // asset for language …") and setup dies before the download
-                // was ever requested.
-                let installed = await SpeechTranscriber.installedLocales.contains(locale)
-                if !installed {
-                    if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                        let observation = request.progress.observe(\.fractionCompleted) { progress, _ in
-                            onDownloadProgress(progress.fractionCompleted)
+                    // Record the recording start with the prepared identity (shows we reused)
+                    await modelClient.recordRecordingStart(locale: locale, preparedIdentity: resident.identity)
+
+                    // Use the resident's objects if available, otherwise create fresh ones
+                    // (In production this always has non-nil objects; in tests with stubs they may be nil)
+                    if let transcriber = resident.transcriber, let analyzer = resident.analyzer, let format = resident.format {
+                        // Production path: use the prepared objects as-is
+                        self.transcriber = transcriber
+                        self.analyzer = analyzer
+                        targetFormat = format
+                        onDownloadProgress(1.0)
+                    } else {
+                        // Stub test path: create fresh Speech objects without calling prepare again
+                        // (The resident still holds the reservation)
+                        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
+                        self.transcriber = transcriber
+
+                        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                            throw TranscriptionSetupError.noAudioFormat
                         }
-                        try await request.downloadAndInstall()
-                        observation.invalidate()
+                        targetFormat = format
+
+                        let analyzer = SpeechAnalyzer(modules: [transcriber])
+                        self.analyzer = analyzer
+                        try await analyzer.prepareToAnalyze(in: format, withProgressReadyHandler: nil)
+
+                        onDownloadProgress(1.0)
                     }
-                }
-                onDownloadProgress(1.0)
+                } else {
+                    // No resident model: perform the full setup path
+                    // First check if installation is needed and install with progress callback
+                    let installed = await modelClient.isInstalled(locale: locale)
+                    if !installed {
+                        try await modelClient.install(locale: locale, onProgress: onDownloadProgress)
+                    } else {
+                        onDownloadProgress(1.0)
+                    }
 
-                guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-                    throw TranscriptionSetupError.noAudioFormat
-                }
-                targetFormat = format
+                    // Now prepare the model (transcriber, analyzer, format, reservation)
+                    let prepared = try await modelClient.prepare(locale: locale)
+                    self.transcriber = prepared.transcriber
+                    self.analyzer = prepared.analyzer
+                    targetFormat = prepared.format
+                    reservedLocale = prepared.reservedLocale
 
-                let analyzer = SpeechAnalyzer(modules: [transcriber])
-                self.analyzer = analyzer
-                try await analyzer.prepareToAnalyze(in: format, withProgressReadyHandler: nil)
+                    // Record the recording start with nil identity (no resident model used)
+                    await modelClient.recordRecordingStart(locale: locale, preparedIdentity: nil)
+                }
 
                 let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
                 inputContinuation = continuation
@@ -202,7 +226,7 @@ final class TranscriptionEngine: @unchecked Sendable {
                     }
                 }
 
-                try await analyzer.start(inputSequence: stream)
+                try await analyzer!.start(inputSequence: stream)
                 await self.mixLoop()
             } catch {
                 // Transcription unavailable (locale/permission/download failure) —
@@ -308,11 +332,10 @@ final class TranscriptionEngine: @unchecked Sendable {
     /// synchronously — same simplification as before: the trailing fragment
     /// becomes the last line without awaiting one more analysis pass, so a
     /// recording stopped mid-sentence doesn't lose it but also doesn't block
-    /// this synchronous call. Proper `SpeechAnalyzer` teardown (flushing
-    /// through `finalize(through:)`, releasing the locale reservation) happens
-    /// in a detached task afterward — safe because `start()` always builds a
-    /// fresh `analyzer`/`transcriber` next time, so a slightly delayed
-    /// cleanup can never observe or corrupt the next session's state.
+    /// this synchronous call. Per-recording state (feed task, input stream,
+    /// pending text, results) is torn down in a detached task. The resident
+    /// prepared resource is retained across calls — only released on selection
+    /// change or app termination.
     @discardableResult
     func stop() -> [TranscriptLine] {
         feedTask?.cancel()
@@ -328,17 +351,33 @@ final class TranscriptionEngine: @unchecked Sendable {
         let capturedAnalyzer = analyzer
         let capturedResultsTask = resultsTask
         let capturedLocale = reservedLocale
+        let usedPreparedModel = activeRecordingPreparedModel
+
+        // Clear per-recording state but only clear reservedLocale if it's
+        // not the resident model's reserved locale
         analyzer = nil
         transcriber = nil
-        reservedLocale = nil
         resultsTask = nil
+        activeRecordingPreparedModel = nil
+
+        // Only clear reservedLocale if this recording didn't use the
+        // resident prepared model (which manages its own reservation)
+        if usedPreparedModel == nil {
+            reservedLocale = nil
+        } else {
+            // Recording used the resident model; keep its reservation active
+            reservedLocale = usedPreparedModel?.reservedLocale
+        }
 
         Task.detached {
             if let capturedAnalyzer {
                 try? await capturedAnalyzer.finalize(through: nil)
             }
             await capturedResultsTask?.value
-            if let capturedLocale {
+
+            // Only release the locale if this recording created its own
+            // reservation (i.e., wasn't using the resident model)
+            if usedPreparedModel == nil, let capturedLocale {
                 await AssetInventory.release(reservedLocale: capturedLocale)
             }
         }
@@ -477,8 +516,7 @@ final class TranscriptionEngine: @unchecked Sendable {
 }
 
 /// Production implementation of TranscriptionModelClient that wraps the
-/// Speech framework APIs. This is a placeholder for now; the actual implementation
-/// will be added in Task 3.
+/// Speech framework APIs.
 struct SpeechTranscriptionModelClient: TranscriptionModelClient {
     func normalizedLocale(for preferredLocale: Locale) async -> Locale? {
         await SpeechTranscriber.supportedLocale(equivalentTo: preferredLocale)
@@ -489,15 +527,49 @@ struct SpeechTranscriptionModelClient: TranscriptionModelClient {
     }
 
     func prepare(locale: Locale) async throws -> PreparedTranscriptionModel {
-        fatalError("prepare not yet implemented in Task 3")
+        // Create the transcriber
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
+
+        // Get the best audio format for this transcriber
+        // Asset install must come BEFORE this: `bestAvailableAudioFormat`
+        // reads the model's sampling rates, so on a machine where the
+        // locale's asset isn't installed yet it fails ("No GeneralASR
+        // asset for language …"). Install must have been called before prepare.
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw TranscriptionSetupError.noAudioFormat
+        }
+
+        // Create and prepare the analyzer
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        try await analyzer.prepareToAnalyze(in: format, withProgressReadyHandler: nil)
+
+        // Reserve the locale
+        try await AssetInventory.reserve(locale: locale)
+
+        return PreparedTranscriptionModel(
+            locale: locale,
+            transcriber: transcriber,
+            analyzer: analyzer,
+            format: format,
+            reservedLocale: locale
+        )
     }
 
     func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws {
-        fatalError("install not yet implemented in Task 3")
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])]) {
+            let observation = request.progress.observe(\.fractionCompleted) { progress, _ in
+                onProgress(progress.fractionCompleted)
+            }
+            try await request.downloadAndInstall()
+            observation.invalidate()
+        }
+        onProgress(1.0)
     }
 
     func release(_ model: PreparedTranscriptionModel) async {
-        // Placeholder for release logic
+        if let reservedLocale = model.reservedLocale {
+            await AssetInventory.release(reservedLocale: reservedLocale)
+        }
     }
 
     func recordPreloadRequested(locale: Locale) async {

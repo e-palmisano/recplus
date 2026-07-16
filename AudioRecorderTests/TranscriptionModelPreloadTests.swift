@@ -109,6 +109,49 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
         XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
     }
+
+    func testStartReusesPreparedModelInsteadOfPreparingAgain() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("en-US", _) = event { return true }
+            return false
+        }
+
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        let snapshot1 = await client.snapshot()
+        let preparedIdentity = try XCTUnwrap(snapshot1.preparedIdentity)
+        try await client.waitForActiveIdentity(preparedIdentity)
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareCounts["en-US"], 1)
+        XCTAssertEqual(engine.activePreparedIdentityForTesting, preparedIdentity)
+        _ = engine.stop()
+        let retainedSnapshot = await client.snapshot()
+        XCTAssertTrue(retainedSnapshot.releaseLocales.isEmpty)
+
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForActiveIdentity(preparedIdentity)
+        let restartedSnapshot = await client.snapshot()
+        XCTAssertEqual(restartedSnapshot.prepareCounts["en-US"], 1)
+        XCTAssertEqual(engine.activePreparedIdentityForTesting, preparedIdentity)
+        _ = engine.stop()
+    }
+
+    func testPreloadFailureIsSilentAndStartStillUsesDownloadFallback() async throws {
+        let client = StubTranscriptionModelClient(installed: [], prepareError: StubError.prepare)
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForInstalledCheck()
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForInstallCount(1)
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.installCount, 1)
+        XCTAssertEqual(snapshot.setupFailureCount, 0)
+    }
 }
 
 // MARK: - Test Helpers
