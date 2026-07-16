@@ -117,6 +117,7 @@ final class TranscriptionEngine: @unchecked Sendable {
     private var startedAt: Date?
     private var feedTask: Task<Void, Never>?
     private var resultsTask: Task<Void, Never>?
+    private var resultsModelIdentity: UUID?
 
     // Preload lifecycle state. Guarded by `preloadStateLock`: `_preload` runs
     // as an unstructured Task per call, so two overlapping `preload()` calls
@@ -171,6 +172,7 @@ final class TranscriptionEngine: @unchecked Sendable {
                 guard let locale = await modelClient.normalizedLocale(for: preferredLocale) else {
                     throw TranscriptionSetupError.localeNotSupported
                 }
+                var recordingModelIdentity: UUID?
 
                 // Check if we have a resident prepared model for this locale.
                 // Locked: `preparedModel` is also read/written by `_preload`
@@ -183,6 +185,7 @@ final class TranscriptionEngine: @unchecked Sendable {
                     return model
                 }
                 if let resident {
+                    recordingModelIdentity = resident.identity
                     // We have a resident model - reuse its identity and reservation
                     reservedLocale = resident.reservedLocale
 
@@ -216,6 +219,7 @@ final class TranscriptionEngine: @unchecked Sendable {
 
                     // Now prepare the model (transcriber, analyzer, format, reservation)
                     let prepared = try await modelClient.prepare(locale: locale)
+                    recordingModelIdentity = prepared.identity
                     self.transcriber = prepared.transcriber
                     self.analyzer = prepared.analyzer
                     targetFormat = prepared.format
@@ -231,23 +235,32 @@ final class TranscriptionEngine: @unchecked Sendable {
                     }
                 }
 
+                if resultsModelIdentity != recordingModelIdentity {
+                    resultsTask?.cancel()
+                    resultsTask = nil
+                    resultsModelIdentity = recordingModelIdentity
+                }
+
                 let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
                 inputContinuation = continuation
-                resultsTask = Task { [weak self] in
-                    guard let results = self?.transcriber?.results else { return }
-                    do {
-                        for try await result in results {
-                            guard let self else { return }
-                            let text = String(result.text.characters)
-                            if result.isFinal {
-                                self.finalizeLine(text: text)
-                            } else {
-                                self.bufferLock.withLock { self.pendingText = text }
-                                self.onPendingTextChanged(text)
+                if resultsTask == nil {
+                    guard let resultTranscriber = self.transcriber else { throw TranscriptionSetupError.noAudioFormat }
+                    resultsTask = Task { [weak self] in
+                        let results = resultTranscriber.results
+                        do {
+                            for try await result in results {
+                                guard let self else { return }
+                                let text = String(result.text.characters)
+                                if result.isFinal {
+                                    self.finalizeLine(text: text)
+                                } else {
+                                    self.bufferLock.withLock { self.pendingText = text }
+                                    self.onPendingTextChanged(text)
+                                }
                             }
+                        } catch {
+                            // Results stream ended (or errored) — nothing further to consume.
                         }
-                    } catch {
-                        // Results stream ended (or errored) — nothing further to consume.
                     }
                 }
 
@@ -381,7 +394,6 @@ final class TranscriptionEngine: @unchecked Sendable {
         }
 
         let capturedAnalyzer = analyzer
-        let capturedResultsTask = resultsTask
         let capturedLocale = reservedLocale
         // Locked: `activeRecordingPreparedModel` is set by `start()` under
         // the same lock; capture-and-clear here must be atomic with that.
@@ -391,26 +403,23 @@ final class TranscriptionEngine: @unchecked Sendable {
             return model
         }
 
-        // Clear per-recording state but only clear reservedLocale if it's
-        // not the resident model's reserved locale
-        analyzer = nil
-        transcriber = nil
-        resultsTask = nil
-
-        // Only clear reservedLocale if this recording didn't use the
-        // resident prepared model (which manages its own reservation)
         if usedPreparedModel == nil {
+            resultsTask?.cancel()
+            analyzer = nil
+            transcriber = nil
+            resultsTask = nil
+            resultsModelIdentity = nil
             reservedLocale = nil
         } else {
-            // Recording used the resident model; keep its reservation active
+            // Keep the resident analyzer, transcriber, and results consumer alive
+            // for the next recording. Only the input session is per-recording.
             reservedLocale = usedPreparedModel?.reservedLocale
         }
 
         Task.detached {
-            if let capturedAnalyzer {
+            if usedPreparedModel == nil, let capturedAnalyzer {
                 try? await capturedAnalyzer.finalize(through: nil)
             }
-            await capturedResultsTask?.value
 
             // Only release the locale if this recording created its own
             // reservation (i.e., wasn't using the resident model)

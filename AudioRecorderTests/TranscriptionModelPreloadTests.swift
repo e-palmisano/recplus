@@ -429,6 +429,61 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         _ = engine.stop()
     }
 
+    func testResidentModelCanStartTwiceWithoutPreparingAgain() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForResidentLocale("en-US")
+        let preparedSnapshot = await client.snapshot()
+        let preparedIdentity = try XCTUnwrap(preparedSnapshot.preparedIdentity)
+
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForActiveIdentity(preparedIdentity)
+        _ = engine.stop()
+
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForEvent { event in
+            if case .recordingStarted("en-US", let identity) = event {
+                return identity == preparedIdentity
+            }
+            return false
+        }
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareCounts["en-US"], 1)
+        XCTAssertEqual(snapshot.recordingStartedLocales, ["en-US", "en-US"])
+        _ = engine.stop()
+    }
+
+    func testStartingDifferentModelDoesNotWaitForPreviousRecordingCleanup() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US"), Locale(identifier: "it-IT")])
+        let engine = makeEngine(client: client)
+
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        try await client.waitForPrepareStart(locale: "en-US")
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .recordingStarted("en-US", nil) = event { return true }
+            return false
+        }
+        _ = engine.stop()
+
+        engine.start(preferredLocale: Locale(identifier: "it-IT"), onDownloadProgress: { _ in })
+        try await client.waitForPrepareStart(locale: "it-IT")
+        await client.completePrepare(locale: "it-IT")
+        try await client.waitForEvent { event in
+            if case .recordingStarted("it-IT", nil) = event { return true }
+            return false
+        }
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareLocales, ["en-US", "it-IT"])
+        XCTAssertEqual(snapshot.recordingStartedLocales, ["en-US", "it-IT"])
+        _ = engine.stop()
+    }
+
     func testSelectionSwapCancelsReleasesAndReplacesModel() async throws {
         // ignoreCancellation: true — the old (en-US) operation's prepare()
         // must actually complete and produce a value for this test to
