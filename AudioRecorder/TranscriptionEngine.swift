@@ -8,6 +8,52 @@ enum TranscriptionSetupError: Error {
     case noAudioFormat
 }
 
+protocol TranscriptionModelClient: Sendable {
+    func normalizedLocale(for preferredLocale: Locale) async -> Locale?
+    func isInstalled(locale: Locale) async -> Bool
+    func prepare(locale: Locale) async throws -> PreparedTranscriptionModel
+    func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws
+    func release(_ model: PreparedTranscriptionModel) async
+    func recordPreloadRequested(locale: Locale) async
+    func recordRecordingStart(locale: Locale, preparedIdentity: UUID?) async
+}
+
+final class PreparedTranscriptionModel: @unchecked Sendable {
+    let locale: Locale
+    let identity: UUID
+    let transcriber: SpeechTranscriber?
+    let analyzer: SpeechAnalyzer?
+    let format: AVAudioFormat?
+    let reservedLocale: Locale?
+
+    init(
+        locale: Locale,
+        identity: UUID = UUID(),
+        transcriber: SpeechTranscriber? = nil,
+        analyzer: SpeechAnalyzer? = nil,
+        format: AVAudioFormat? = nil,
+        reservedLocale: Locale? = nil
+    ) {
+        self.locale = locale
+        self.identity = identity
+        self.transcriber = transcriber
+        self.analyzer = analyzer
+        self.format = format
+        self.reservedLocale = reservedLocale
+    }
+}
+
+struct NormalizedSelectionIdentity: Equatable, Sendable {
+    let generation: Int
+    let localeIdentifier: String
+}
+
+struct PreloadOperationMarker: Equatable, Sendable {
+    let operationID: UUID
+    let generation: Int
+    let localeIdentifier: String
+}
+
 /// Coordinates live transcription: receives raw audio buffers from both
 /// recorders as they arrive, resamples and mixes them, and streams the
 /// result into Apple's on-device SpeechAnalyzer. Reports results via
@@ -27,6 +73,7 @@ final class TranscriptionEngine: @unchecked Sendable {
     private let onLineFinalized: (TranscriptLine) -> Void
     private let onPendingTextChanged: (String) -> Void
     private let onSetupFailed: (String) -> Void
+    private let modelClient: any TranscriptionModelClient
 
     private let bufferLock = NSLock()
     private var systemAccumulator: [Float] = []
@@ -59,11 +106,21 @@ final class TranscriptionEngine: @unchecked Sendable {
     private var feedTask: Task<Void, Never>?
     private var resultsTask: Task<Void, Never>?
 
+    // Preload lifecycle state
+    private var preparedModel: PreparedTranscriptionModel?
+    private var preloadTask: Task<Void, Never>?
+    private var selectionGeneration = 0
+    private var activePreparedLocale: Locale?
+    private var activeRecordingPreparedModel: PreparedTranscriptionModel?
+    private var preloadMarker: PreloadOperationMarker?
+
     init(
+        modelClient: any TranscriptionModelClient = SpeechTranscriptionModelClient(),
         onLineFinalized: @escaping (TranscriptLine) -> Void,
         onPendingTextChanged: @escaping (String) -> Void,
         onSetupFailed: @escaping (String) -> Void
     ) {
+        self.modelClient = modelClient
         self.onLineFinalized = onLineFinalized
         self.onPendingTextChanged = onPendingTextChanged
         self.onSetupFailed = onSetupFailed
@@ -287,5 +344,135 @@ final class TranscriptionEngine: @unchecked Sendable {
         }
 
         return bufferLock.withLock { finalizedLines }
+    }
+
+    /// Initiates asynchronous preloading of the specified locale's prepared
+    /// model. If the locale is already installed, this launches (or deduplicates)
+    /// a background preload task that normalizes the locale, checks installation,
+    /// prepares the model, and publishes it as resident if still current.
+    /// Returns immediately; the actual preload happens asynchronously.
+    func preload(preferredLocale: Locale) {
+        Task {
+            await _preload(preferredLocale: preferredLocale)
+        }
+    }
+
+    private func _preload(preferredLocale: Locale) async {
+        // Normalize the locale
+        guard let normalized = await modelClient.normalizedLocale(for: preferredLocale) else {
+            return
+        }
+
+        let identity = NormalizedSelectionIdentity(
+            generation: selectionGeneration,
+            localeIdentifier: normalized.identifier
+        )
+
+        // Check if installed
+        let installed = await modelClient.isInstalled(locale: normalized)
+        guard installed else {
+            return
+        }
+
+        // Record that preload was requested
+        await modelClient.recordPreloadRequested(locale: normalized)
+
+        // Create a marker for this operation
+        let marker = PreloadOperationMarker(
+            operationID: UUID(),
+            generation: selectionGeneration,
+            localeIdentifier: normalized.identifier
+        )
+        preloadMarker = marker
+
+        // Perform the actual prepare
+        do {
+            let model = try await modelClient.prepare(locale: normalized)
+
+            // Check if this operation is still current
+            if preloadMarker == marker {
+                preparedModel = model
+                activePreparedLocale = normalized
+            } else {
+                // This operation became obsolete, release the model
+                await modelClient.release(model)
+            }
+        } catch {
+            // Prepare failed; clear the marker only if it's still ours
+            if preloadMarker == marker {
+                preloadMarker = nil
+            }
+        }
+    }
+
+    /// Invalidates the previously selected locale, cancels any in-flight preload,
+    /// releases the resident prepared resource, and advances the selection generation
+    /// so any newly-arriving results are ignored.
+    /// Does not start a new preload.
+    func invalidateSelection(preferredLocale: Locale) {
+        preloadTask?.cancel()
+        preloadTask = nil
+        selectionGeneration += 1
+
+        if let model = preparedModel {
+            preparedModel = nil
+            activePreparedLocale = nil
+            Task {
+                await modelClient.release(model)
+            }
+        }
+
+        preloadMarker = nil
+    }
+
+    /// Releases the resident prepared model without invalidating the selection.
+    /// Used during app termination to clean up resources.
+    func releasePreparedResources() {
+        if let model = preparedModel {
+            preparedModel = nil
+            activePreparedLocale = nil
+            Task {
+                await modelClient.release(model)
+            }
+        }
+    }
+
+    #if DEBUG
+    var preparedLocaleForTesting: Locale? { preparedModel?.locale }
+    var activePreparedIdentityForTesting: UUID? { activeRecordingPreparedModel?.identity }
+    var inFlightPreloadLocaleForTesting: String? { preloadMarker?.localeIdentifier }
+    #endif
+}
+
+/// Production implementation of TranscriptionModelClient that wraps the
+/// Speech framework APIs. This is a placeholder for now; the actual implementation
+/// will be added in Task 3.
+struct SpeechTranscriptionModelClient: TranscriptionModelClient {
+    func normalizedLocale(for preferredLocale: Locale) async -> Locale? {
+        await SpeechTranscriber.supportedLocale(equivalentTo: preferredLocale)
+    }
+
+    func isInstalled(locale: Locale) async -> Bool {
+        await SpeechTranscriber.installedLocales.contains(locale)
+    }
+
+    func prepare(locale: Locale) async throws -> PreparedTranscriptionModel {
+        fatalError("prepare not yet implemented in Task 3")
+    }
+
+    func install(locale: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        fatalError("install not yet implemented in Task 3")
+    }
+
+    func release(_ model: PreparedTranscriptionModel) async {
+        // Placeholder for release logic
+    }
+
+    func recordPreloadRequested(locale: Locale) async {
+        // Production: no-op
+    }
+
+    func recordRecordingStart(locale: Locale, preparedIdentity: UUID?) async {
+        // Production: no-op
     }
 }
