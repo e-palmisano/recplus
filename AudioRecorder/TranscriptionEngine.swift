@@ -223,8 +223,12 @@ final class TranscriptionEngine: @unchecked Sendable {
                 }
 
                 // Guaranteed non-nil here: both branches above return early when
-                // their Speech objects are nil (stub-only test scenarios).
-                guard let analyzer = self.analyzer else { return }
+                // their Speech objects are nil (stub-only test scenarios). Throwing
+                // (rather than returning silently) means that if this invariant is
+                // ever violated by a future change, the existing catch block still
+                // reports the failure via `onSetupFailed` instead of leaving the
+                // results pipeline waiting on an analyzer that never starts.
+                guard let analyzer = self.analyzer else { throw TranscriptionSetupError.noAudioFormat }
                 try await analyzer.start(inputSequence: stream)
                 await self.mixLoop()
             } catch {
