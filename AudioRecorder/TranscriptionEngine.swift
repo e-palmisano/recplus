@@ -371,10 +371,70 @@ final class TranscriptionEngine: @unchecked Sendable {
             generation: selectionGeneration,
             localeIdentifier: normalized.identifier
         )
-        preloadMarker = marker
 
-        // Task 1 seam: stub implementation. Task 2 adds isInstalled check,
-        // prepare call, and publication logic here.
+        // Check if an equivalent operation is already in flight
+        if let existingMarker = preloadMarker,
+           existingMarker.localeIdentifier == normalized.identifier {
+            // Equivalent concurrent request: don't create a new task, just return
+            return
+        }
+
+        // Store the marker (uniquely identifies this operation)
+        preloadMarker = marker
+        let capturedMarker = marker
+        let capturedGeneration = selectionGeneration
+
+        do {
+            // Step 1: Check if installed (installed-only preload)
+            let installed = await modelClient.isInstalled(locale: normalized)
+            guard installed else {
+                // Not installed: silently return without preparing
+                // Cleanup: clear marker only if it still matches
+                if preloadMarker == capturedMarker && selectionGeneration == capturedGeneration {
+                    preloadMarker = nil
+                }
+                return
+            }
+
+            // Step 2: Check for cancellation before preparation
+            try Task.checkCancellation()
+
+            // Step 3: Prepare the model
+            let prepared = try await modelClient.prepare(locale: normalized)
+
+            // Step 4: Check for cancellation after preparation
+            try Task.checkCancellation()
+
+            // Step 5: Atomic marker/generation/locale validation
+            // Only publish if marker and generation still match
+            guard preloadMarker == capturedMarker && selectionGeneration == capturedGeneration else {
+                // Late arrival: marker or generation has changed. Release and return.
+                await modelClient.release(prepared)
+                return
+            }
+
+            // Step 6: Publish the prepared model
+            preparedModel = prepared
+            activePreparedLocale = normalized
+
+        } catch is CancellationError {
+            // Cancellation detected: cleanup only if marker and generation still match
+            // This prevents a cancelled operation from clearing state from a newer operation
+            if preloadMarker == capturedMarker && selectionGeneration == capturedGeneration {
+                preloadMarker = nil
+                preparedModel = nil
+                activePreparedLocale = nil
+            }
+            // If marker/generation don't match, don't clear state - a newer operation may be in progress
+        } catch {
+            // Any other error: cleanup only if marker and generation still match
+            if preloadMarker == capturedMarker && selectionGeneration == capturedGeneration {
+                preloadMarker = nil
+                preparedModel = nil
+                activePreparedLocale = nil
+            }
+            // Error is silent (non-blocking)
+        }
     }
 
     /// Invalidates the previously selected locale, cancels any in-flight preload,

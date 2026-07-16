@@ -22,6 +22,85 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         XCTAssertTrue(snapshot.releaseLocales.isEmpty)
         XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
     }
+
+    func testPreloadDoesNotPrepareAnUninstalledSelectedLocale() async throws {
+        let client = StubTranscriptionModelClient(installed: [])
+        let engine = makeEngine(client: client)
+
+        engine.preload(preferredLocale: Locale(identifier: "it-IT"))
+        try await client.waitForEvent { if case .installedCheck("it-IT", false) = $0 { return true }; return false }
+
+        let snapshot = await client.snapshot()
+        XCTAssertTrue(snapshot.prepareLocales.isEmpty)
+        XCTAssertNil(engine.preparedLocaleForTesting)
+    }
+
+    func testEquivalentConcurrentPreloadsShareOnePreparationOperation() async throws {
+        let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
+        let engine = makeEngine(client: client)
+
+        engine.preload(preferredLocale: Locale(identifier: "en_US"))
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForEvent { event in
+            if case .prepareStarted("en-US", _) = event { return true }
+            return false
+        }
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .resourcePublished("en-US", _) = event { return true }
+            return false
+        }
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareLocales, ["en-US"])
+        XCTAssertEqual(snapshot.prepareCounts["en-US"], 1)
+    }
+
+    func testEquivalentRequestAfterFailedPreloadDoesNotAwaitStaleTask() async throws {
+        let client = StubTranscriptionModelClient(
+            installed: [Locale(identifier: "en-US")],
+            prepareErrors: [.prepare, nil]
+        )
+        let engine = makeEngine(client: client)
+
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(1)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForPreloadFailure()
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(2)
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForResidentLocale("en-US")
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareLocales, ["en-US", "en-US"])
+        XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
+        XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "en-US")
+    }
+
+    func testEquivalentRequestAfterCancelledPreloadDoesNotAwaitStaleTask() async throws {
+        let client = StubTranscriptionModelClient(
+            installed: [Locale(identifier: "en-US")],
+            ignoreCancellation: false
+        )
+        let engine = makeEngine(client: client)
+
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareStart(locale: "en-US")
+        engine.invalidateSelection(preferredLocale: Locale(identifier: "it-IT"))
+        engine.preload(preferredLocale: Locale(identifier: "en-US"))
+        try await client.waitForPrepareCount(2)
+        await client.completePrepare(locale: "en-US")
+        await client.completePrepare(locale: "en-US")
+        try await client.waitForEvent { event in
+            if case .prepareFinished("en-US", _) = event { return true }
+            return false
+        }
+        try await client.waitForReleaseCount(1)
+
+        let snapshot = await client.snapshot()
+        XCTAssertEqual(snapshot.prepareCounts["en-US"], 2)
+    }
 }
 
 // MARK: - Test Helpers
