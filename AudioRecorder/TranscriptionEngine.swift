@@ -424,8 +424,15 @@ final class TranscriptionEngine: @unchecked Sendable {
             localeIdentifier: normalized.identifier
         )
         if let existingMarker = preloadMarker,
-           existingMarker.localeIdentifier == normalized.identifier {
-            // Equivalent concurrent request: don't create a new task, just return
+           existingMarker.localeIdentifier == normalized.identifier,
+           existingMarker.generation == selectionGeneration {
+            // Equivalent concurrent request for the SAME generation: don't
+            // create a new task, just return. A marker from an older
+            // generation (left in place by invalidateSelection for its own
+            // operation's terminal cleanup, not cleared eagerly) must not be
+            // mistaken for a live duplicate — that operation has already
+            // been invalidated/cancelled, and a fresh request for the same
+            // locale under the new generation must proceed, not await it.
             return
         }
 
@@ -457,20 +464,31 @@ final class TranscriptionEngine: @unchecked Sendable {
             // Step 3: Prepare the model
             let prepared = try await modelClient.prepare(locale: normalized)
 
-            // Step 4: Check for cancellation after preparation
-            try Task.checkCancellation()
-
-            // Step 5: Atomic marker/generation/locale validation
-            // Only publish if marker and generation still match
-            guard preloadMarker == capturedMarker && selectionGeneration == capturedGeneration else {
-                // Late arrival: marker or generation has changed. Release and return.
+            // Step 4/5: Validate this operation is still current — checked as
+            // one condition (not a throwing checkCancellation) so `prepared`
+            // stays in scope here for release. A cancellation detected only
+            // after `prepare()` already returned a value must still release
+            // that value; it cannot do so from the catch block below, which
+            // has no access to a local from this scope.
+            let stillCurrent = preloadMarker == capturedMarker && selectionGeneration == capturedGeneration
+            guard !Task.isCancelled, stillCurrent else {
+                // Cancelled, or superseded by a newer operation: release the
+                // prepared value. Only clear the marker if it's still this
+                // operation's (i.e. cancelled-but-current, not superseded) —
+                // a superseded marker belongs to the newer operation.
                 await modelClient.release(prepared)
+                if stillCurrent {
+                    preloadMarker = nil
+                }
                 return
             }
 
-            // Step 6: Publish the prepared model
+            // Step 6: Publish the prepared model. The operation is complete,
+            // so clear the marker too — `stillCurrent` above already
+            // confirmed it's still this operation's marker.
             preparedModel = prepared
             activePreparedLocale = normalized
+            preloadMarker = nil
 
         } catch is CancellationError {
             // Cancellation detected: cleanup only if marker and generation still match
