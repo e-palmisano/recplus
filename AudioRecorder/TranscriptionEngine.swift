@@ -346,13 +346,12 @@ final class TranscriptionEngine: @unchecked Sendable {
         return bufferLock.withLock { finalizedLines }
     }
 
-    /// Initiates asynchronous preloading of the specified locale's prepared
-    /// model. If the locale is already installed, this launches (or deduplicates)
-    /// a background preload task that normalizes the locale, checks installation,
-    /// prepares the model, and publishes it as resident if still current.
-    /// Returns immediately; the actual preload happens asynchronously.
+    /// Records a preload request for the specified locale and sets up the cancellable
+    /// seam for background preload coordination. Task 1 records the request and creates
+    /// the infrastructure; actual installation check and model preparation happen in Task 2.
+    /// Returns immediately; the seam setup happens asynchronously.
     func preload(preferredLocale: Locale) {
-        Task {
+        preloadTask = Task {
             await _preload(preferredLocale: preferredLocale)
         }
     }
@@ -363,21 +362,10 @@ final class TranscriptionEngine: @unchecked Sendable {
             return
         }
 
-        let identity = NormalizedSelectionIdentity(
-            generation: selectionGeneration,
-            localeIdentifier: normalized.identifier
-        )
-
-        // Check if installed
-        let installed = await modelClient.isInstalled(locale: normalized)
-        guard installed else {
-            return
-        }
-
         // Record that preload was requested
         await modelClient.recordPreloadRequested(locale: normalized)
 
-        // Create a marker for this operation
+        // Create a marker for this operation (stored for Task 2 deduplication)
         let marker = PreloadOperationMarker(
             operationID: UUID(),
             generation: selectionGeneration,
@@ -385,24 +373,8 @@ final class TranscriptionEngine: @unchecked Sendable {
         )
         preloadMarker = marker
 
-        // Perform the actual prepare
-        do {
-            let model = try await modelClient.prepare(locale: normalized)
-
-            // Check if this operation is still current
-            if preloadMarker == marker {
-                preparedModel = model
-                activePreparedLocale = normalized
-            } else {
-                // This operation became obsolete, release the model
-                await modelClient.release(model)
-            }
-        } catch {
-            // Prepare failed; clear the marker only if it's still ours
-            if preloadMarker == marker {
-                preloadMarker = nil
-            }
-        }
+        // Task 1 seam: stub implementation. Task 2 adds isInstalled check,
+        // prepare call, and publication logic here.
     }
 
     /// Invalidates the previously selected locale, cancels any in-flight preload,
