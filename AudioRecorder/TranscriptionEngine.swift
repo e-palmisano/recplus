@@ -160,31 +160,21 @@ final class TranscriptionEngine: @unchecked Sendable {
                     // Record the recording start with the prepared identity (shows we reused)
                     await modelClient.recordRecordingStart(locale: locale, preparedIdentity: resident.identity)
 
-                    // Use the resident's objects if available, otherwise create fresh ones
-                    // (In production this always has non-nil objects; in tests with stubs they may be nil)
-                    if let transcriber = resident.transcriber, let analyzer = resident.analyzer, let format = resident.format {
-                        // Production path: use the prepared objects as-is
-                        self.transcriber = transcriber
-                        self.analyzer = analyzer
-                        targetFormat = format
+                    // In production the resident model always carries real Speech
+                    // objects. Only deterministic unit tests inject a stub whose
+                    // `prepare()` returns nil transcriber/analyzer/format (real
+                    // Speech types can't be faked) — in that case there is no
+                    // pipeline to drive, so report completion and stop; the reuse/
+                    // identity tracking above already recorded what those tests
+                    // assert on.
+                    guard let transcriber = resident.transcriber, let analyzer = resident.analyzer, let format = resident.format else {
                         onDownloadProgress(1.0)
-                    } else {
-                        // Stub test path: create fresh Speech objects without calling prepare again
-                        // (The resident still holds the reservation)
-                        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [.volatileResults], attributeOptions: [])
-                        self.transcriber = transcriber
-
-                        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-                            throw TranscriptionSetupError.noAudioFormat
-                        }
-                        targetFormat = format
-
-                        let analyzer = SpeechAnalyzer(modules: [transcriber])
-                        self.analyzer = analyzer
-                        try await analyzer.prepareToAnalyze(in: format, withProgressReadyHandler: nil)
-
-                        onDownloadProgress(1.0)
+                        return
                     }
+                    self.transcriber = transcriber
+                    self.analyzer = analyzer
+                    targetFormat = format
+                    onDownloadProgress(1.0)
                 } else {
                     // No resident model: perform the full setup path
                     // First check if installation is needed and install with progress callback
@@ -204,6 +194,12 @@ final class TranscriptionEngine: @unchecked Sendable {
 
                     // Record the recording start with nil identity (no resident model used)
                     await modelClient.recordRecordingStart(locale: locale, preparedIdentity: nil)
+
+                    // See the resident-path comment above: only a test stub returns
+                    // nil Speech objects here. Nothing further to drive in that case.
+                    guard prepared.transcriber != nil, prepared.analyzer != nil, prepared.format != nil else {
+                        return
+                    }
                 }
 
                 let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
@@ -226,7 +222,10 @@ final class TranscriptionEngine: @unchecked Sendable {
                     }
                 }
 
-                try await analyzer!.start(inputSequence: stream)
+                // Guaranteed non-nil here: both branches above return early when
+                // their Speech objects are nil (stub-only test scenarios).
+                guard let analyzer = self.analyzer else { return }
+                try await analyzer.start(inputSequence: stream)
                 await self.mixLoop()
             } catch {
                 // Transcription unavailable (locale/permission/download failure) —
