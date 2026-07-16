@@ -342,7 +342,10 @@ actor StubTranscriptionModelClient: TranscriptionModelClient {
 }
 
 func waitFor(_ probe: PreloadTestProbe, _ predicate: @escaping @Sendable (PreloadTestEvent) -> Bool) async throws {
-    // Simply await the probe's waitFor directly, which handles the synchronization
-    // The probe's waitFor is already synchronous and will return when the predicate matches
-    await probe.waitFor(predicate)
+    let expectation = XCTestExpectation(description: "preload probe event")
+    Task {
+        await probe.waitFor(predicate)
+        expectation.fulfill()
+    }
+    await XCTWaiter().fulfillment(of: [expectation], timeout: 2)
 }
