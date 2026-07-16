@@ -530,6 +530,7 @@ struct SessionHarness {
     let installer: GatedModelInstaller
 }
 
+@MainActor
 func makeSessionHarness(selectedID: String, normalized: String, installed: Bool) -> SessionHarness {
     let probe = PreloadTestProbe()
     let installer = GatedModelInstaller(probe: probe, normalized: normalized, installed: installed)
@@ -538,6 +539,7 @@ func makeSessionHarness(selectedID: String, normalized: String, installed: Bool)
     return SessionHarness(session: session, probe: probe, installer: installer)
 }
 
+@MainActor
 func makeInjectedSession(engine: TranscriptionEngine, selectedID: String) -> RecordingSession {
     let resolver = FixedLocaleResolver(identifier: selectedID)
     let installer = GatedModelInstaller(probe: PreloadTestProbe(), normalized: selectedID, installed: true)
@@ -575,6 +577,7 @@ test-only flag or a race-prone immediate property read.
 import XCTest
 @testable import AudioRecorder
 
+@MainActor
 final class TranscriptionModelPreloadTests: XCTestCase {
     func testPreloadOfInstalledSelectedLocalePreparesExactlyOneResidentModel() async throws {
         let client = StubTranscriptionModelClient(installed: [Locale(identifier: "en-US")])
@@ -1117,6 +1120,12 @@ func testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording() async thro
     XCTAssertEqual(snapshot.prepareCounts["it-IT"], 1)
     XCTAssertEqual(engine.inFlightPreloadLocaleForTesting, "it-IT")
 
+    await client.completePrepare(locale: "it-IT")
+    try await client.waitForEvent { event in
+        if case .resourcePublished("it-IT", _) = event { return true }
+        return false
+    }
+
     engine.start(preferredLocale: Locale(identifier: "it-IT"), onDownloadProgress: { _ in })
     try await client.waitForEvent { event in
         if case .recordingStarted("it-IT", _) = event { return true }
@@ -1130,18 +1139,14 @@ func testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording() async thro
         if case .prepareFailed("en-US", _) = event { return true }
         return false
     }
-    XCTAssertEqual(engine.inFlightPreloadLocaleForTesting, "it-IT")
-    await client.completePrepare(locale: "it-IT")
-    try await client.waitForEvent { event in
-        if case .resourcePublished("it-IT", _) = event { return true }
-        return false
-    }
     let publishedSnapshot = await client.snapshot()
     XCTAssertEqual(publishedSnapshot.prepareCounts["it-IT"], 1)
     XCTAssertEqual(engine.preparedLocaleForTesting?.identifier, "it-IT")
     XCTAssertNil(engine.inFlightPreloadLocaleForTesting)
 }
 ```
+
+The required event order is explicit: `.prepareStarted("en-US", _)` → `.prepareStarted("it-IT", _)` → assert the live `it-IT` marker while B is still gated → release B's preparation gate → `.resourcePublished("it-IT", _)` → call `start("it-IT")` → `.recordingStarted("it-IT", _)` → release the still-gated A preparation → `.prepareFailed("en-US", _)` → final marker is `nil`. The test must not await `.recordingStarted` while the B gate is closed. Because the old A gate remains closed until after `.recordingStarted`, recording proves it did not await stale A; the late A failure cannot clear B's marker or block recording.
 
 - [ ] **Step 2: Run the race/release tests to verify they fail.**
 
@@ -1453,7 +1458,19 @@ func testFailedOrCancelledPreloadMarkerIsNotReusedByDeduplicatedCaller() async t
 
 Each test must use `waitForEvent`/actor state, assert event order (`install.completed < preload.started`), use an explicit installation gate for stale-download completion, release the installation gate and then the preparation gate before waiting for successful-download publication, and use a bounded timeout so a deadlocked task fails deterministically. Every A→B race test that expects B resident must call `preload(B)` after `invalidateSelection(A)`; invalidation itself never starts B. While B preparation is gated, assert the live B marker; after B publication, assert that the matching in-flight marker is nil. Do not change existing tests.
 
-### Deterministic wait audit
+### Deterministic wait and Swift 6 actor-isolation audit
+
+All test methods in `TranscriptionModelPreloadTests` use the explicit declaration `@MainActor final class TranscriptionModelPreloadTests: XCTestCase`. This makes every direct `RecordingSession` initializer, property access, and method call in the test snippets type-correct under Swift 6. The two global harness constructors that create `RecordingSession` are independently annotated `@MainActor`:
+
+```swift
+@MainActor
+func makeSessionHarness(selectedID: String, normalized: String, installed: Bool) -> SessionHarness
+
+@MainActor
+func makeInjectedSession(engine: TranscriptionEngine, selectedID: String) -> RecordingSession
+```
+
+Keep `SessionHarness` as a value containing the main-actor-isolated session; all accesses such as `harness.session.downloadModel(...)`, `harness.session.selectTranscriptionLocale(...)`, and `session.releaseTranscriptionResources()` occur from the `@MainActor` test methods. Actor-backed probe/client reads remain explicitly `await`; do not mix this approach with ad hoc `MainActor.run` wrappers. Audit every `RecordingSession` construction and API access in Tasks 4 and 6, including the stale-download, successful-download, and termination snippets, against these annotations before implementation.
 
 The corrected snippets in Tasks 1–7 use the following ordered protocol; no wait is allowed before its corresponding trigger or gate release:
 
@@ -1466,7 +1483,7 @@ The corrected snippets in Tasks 1–7 use the following ordered protocol; no wai
 | Explicit-download publication | Release `completeInstall(locale)`, wait for `.installCompleted`, wait for `.prepareStarted`, call `completePrepare(locale)`, then wait for `.resourcePublished`. |
 | Termination release | First complete preparation and wait for `.resourcePublished`; only then call `releasePreparedResources()` and wait for the release event. |
 | Second preparation reaches `prepareStarted` | Release its own `completePrepare(locale)` permit and await its terminal `.resourcePublished`, `.prepareFailed`, or `.prepareFinished` event before asserting resident state, marker cleanup, or release counts. |
-| Recording-start identity | Call `start`, await the matching `.recordingStarted` event, then read `activePreparedIdentityForTesting`; never assert that property immediately after `start`. |
+| Recording-start identity | Release the matching preparation gate first; await `.resourcePublished` when the test needs a resident resource; call `start`, await the matching `.recordingStarted` event, then read `activePreparedIdentityForTesting`; never assert that property immediately after `start`. In the old-A late-failure race, leave A gated until after `.recordingStarted` to prove start does not await stale A. |
 | Preload-request event | The engine installs the marker and calls `recordPreloadRequested(locale:)`; only then may a test await `.preloadRequested`. |
 | Count/event assertions | Read `await client.snapshot()` or `await probe` accessors into a local value before asserting; no actor property is read synchronously. |
 
@@ -1474,7 +1491,7 @@ The exact task numbers changed by this audit are **Tasks 1, 2, 3, 4, 5, 6, and 7
 
 The actor-backed fake adds these async APIs: `PreloadTestProbe.waitForPrepareRelease(locale:)`, `waitForPrepareCount(_:)`, `waitForReleaseCount(_:)`, `waitForInstallCount(_:)`, `completePrepare(locale:)`, `completeInstall(locale:)`, `preloadRequestLocales()`, `publishedLocales()`, `prepareRequestLocales()`, and `releaseLocales()`; `StubTranscriptionModelClient.completePrepare(locale:)`, `completeInstall(locale:)`, `recordPreloadRequested(locale:)`, `snapshot() async`, `waitForEvent(_:)`, `waitForPrepareStart(locale:)`, `waitForPrepareCount(_:)`, `waitForPreloadFailure()`, `waitForResidentLocale(_:)`, `waitForLateResult(locale:)`, `waitForReleaseCount(_:)`, `waitForActiveIdentity(_:)`, `waitForInstalledCheck()`, `waitForInstallCount(_:)`, and `waitForInstallCompleted(locale:)`; and the installer seam's `waitForInstallStart(locale:)`, `completeInstall(locale:)`, and `snapshot() async`. `StubSnapshot` contains every value asserted by the snippets, and all reads of those values are performed after `await`.
 
-**Confirmation:** every deterministic wait for publication, failure, residency, or termination release now has a preceding trigger; gate completion stores permits when registration has not happened yet and releases exactly one preparation/install waiter; every A→B test explicitly starts B and releases B's preparation gate before waiting for B residency; every second-preload test releases its own gate and awaits its terminal event before cleanup assertions; every A late result/failure wait follows release of A's gate; recording-start identity assertions follow `.recordingStarted`; `preloadRequested` is emitted only by `TranscriptionEngine` through `recordPreloadRequested`; and coordinator harnesses install the requested `selectedID` into the session setting. No snippet uses sleeps, polling, TODOs, undefined fake APIs, or synchronous actor-backed fake access.
+**Confirmation:** every deterministic wait for publication, failure, residency, or termination release now has a preceding trigger; gate completion stores permits when registration has not happened yet and releases exactly one preparation/install waiter; every A→B test explicitly starts B and releases B's preparation gate before waiting for B residency; the old-A late-failure race releases B before awaiting recording start and leaves A gated until after `.recordingStarted`; every second-preload test releases its own gate and awaits its terminal event before cleanup assertions; every A late result/failure wait follows release of A's gate; recording-start identity assertions follow `.recordingStarted`; `preloadRequested` is emitted only by `TranscriptionEngine` through `recordPreloadRequested`; coordinator harnesses install the requested `selectedID` into the session setting; and every `RecordingSession` test construction/access is covered by explicit `@MainActor` annotations. No snippet uses sleeps, polling, TODOs, undefined fake APIs, or synchronous actor-backed fake access.
 
 - [ ] **Step 5: Run the complete verification command and inspect its terminal output.**
 
@@ -1559,3 +1576,5 @@ The following corrections apply across Tasks 1–7 and the shared harness:
 - **Tasks 1, 3, and 6 — recording identity:** `activePreparedIdentityForTesting` is part of the shared DEBUG API, and every assertion after `start` follows an explicit `.recordingStarted` event carrying the expected identity.
 - **Tasks 2, 4, and 6 — request-event provenance:** `TranscriptionEngine` produces `.preloadRequested` through the exact `TranscriptionModelClient.recordPreloadRequested(locale:)` seam; the production implementation is a no-op and the actor fake records the event. Tests await only this emitted event.
 - **Task 4 — selected-ID coverage:** the injected `RecordingSession` initializer accepts `selectedID` and assigns it through the actual coordinator selection setting; both session harness constructors pass the requested ID, so normalization and generation tests exercise the selected setting rather than an unused resolver argument.
+- **Task 4 — selected-ID coverage and Swift 6 isolation:** the injected `RecordingSession` initializer accepts `selectedID` and assigns it through the actual coordinator selection setting; both session harness constructors pass the requested ID, so normalization and generation tests exercise the selected setting rather than an unused resolver argument. `TranscriptionModelPreloadTests`, `makeSessionHarness`, and `makeInjectedSession` are explicitly `@MainActor`, making every `RecordingSession` construction and API access type-correct without inconsistent `MainActor.run` wrappers.
+- **Task 5 — old-A late-failure ordering:** `testOldAGatedLateFailureCannotClearLiveBMarkerOrBlockRecording` asserts the live B marker while B is gated, releases B before awaiting recording start, waits for B publication and `.recordingStarted`, and releases the stale A gate only afterward. Its expected order is stated directly in the test section, proving recording does not await stale A.
