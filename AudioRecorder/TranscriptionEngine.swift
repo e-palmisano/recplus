@@ -86,6 +86,9 @@ final class TranscriptionEngine: @unchecked Sendable {
     private let onPendingTextChanged: (String) -> Void
     private let onSetupFailed: (String) -> Void
     private let modelClient: any TranscriptionModelClient
+    private let feedTaskOverride: (@Sendable (UUID, @escaping @Sendable () async -> Void) async -> Void)?
+    private let mixLoopCheckpoint: (@Sendable (UUID) async -> Void)?
+    private let mixLoopDidSnapshot: (@Sendable (UUID, Int) async -> Void)?
 
     private let bufferLock = NSLock()
     private var systemAccumulator: [Float] = []
@@ -118,6 +121,7 @@ final class TranscriptionEngine: @unchecked Sendable {
     private var feedTask: Task<Void, Never>?
     private var resultsTask: Task<Void, Never>?
     private var resultsModelIdentity: UUID?
+    private var recordingToken = UUID()
 
     // Preload lifecycle state. Guarded by `preloadStateLock`: `_preload` runs
     // as an unstructured Task per call, so two overlapping `preload()` calls
@@ -140,12 +144,18 @@ final class TranscriptionEngine: @unchecked Sendable {
         modelClient: any TranscriptionModelClient = SpeechTranscriptionModelClient(),
         onLineFinalized: @escaping (TranscriptLine) -> Void,
         onPendingTextChanged: @escaping (String) -> Void,
-        onSetupFailed: @escaping (String) -> Void
+        onSetupFailed: @escaping (String) -> Void,
+        feedTaskOverride: (@Sendable (UUID, @escaping @Sendable () async -> Void) async -> Void)? = nil,
+        mixLoopCheckpoint: (@Sendable (UUID) async -> Void)? = nil,
+        mixLoopDidSnapshot: (@Sendable (UUID, Int) async -> Void)? = nil
     ) {
         self.modelClient = modelClient
         self.onLineFinalized = onLineFinalized
         self.onPendingTextChanged = onPendingTextChanged
         self.onSetupFailed = onSetupFailed
+        self.feedTaskOverride = feedTaskOverride
+        self.mixLoopCheckpoint = mixLoopCheckpoint
+        self.mixLoopDidSnapshot = mixLoopDidSnapshot
     }
 
     /// Starts the background transcription pipeline. Locale/asset resolution
@@ -158,20 +168,32 @@ final class TranscriptionEngine: @unchecked Sendable {
     /// progress UI (unlike WhisperKit, which always did a network round-trip
     /// even for cached models).
     func start(preferredLocale: Locale, onDownloadProgress: @escaping @Sendable (Double) -> Void) {
+        let token = UUID()
         bufferLock.withLock {
+            recordingToken = token
             systemAccumulator = []
             micAccumulator = []
             pendingText = ""
             finalizedLines = []
+            startedAt = Date()
         }
-        startedAt = Date()
 
         feedTask = Task {
+            guard self.isCurrentRecording(token) else { return }
+            if let feedTaskOverride {
+                let runMixLoop: @Sendable () async -> Void = { [weak self] in
+                    guard let self else { return }
+                    await self.mixLoop(token: token)
+                }
+                await feedTaskOverride(token, runMixLoop)
+                return
+            }
             do {
                 guard SpeechTranscriber.isAvailable else { throw TranscriptionSetupError.notAvailable }
                 guard let locale = await modelClient.normalizedLocale(for: preferredLocale) else {
                     throw TranscriptionSetupError.localeNotSupported
                 }
+                guard self.isCurrentRecording(token) else { return }
                 var recordingModelIdentity: UUID?
 
                 // Check if we have a resident prepared model for this locale.
@@ -184,13 +206,18 @@ final class TranscriptionEngine: @unchecked Sendable {
                     activeRecordingPreparedModel = model
                     return model
                 }
+                guard self.isCurrentRecording(token) else { return }
                 if let resident {
                     recordingModelIdentity = resident.identity
                     // We have a resident model - reuse its identity and reservation
-                    reservedLocale = resident.reservedLocale
+                    let ownsResidentState = self.setCurrentRecordingState(token) {
+                        reservedLocale = resident.reservedLocale
+                    }
+                    guard ownsResidentState else { return }
 
                     // Record the recording start with the prepared identity (shows we reused)
                     await modelClient.recordRecordingStart(locale: locale, preparedIdentity: resident.identity)
+                    guard self.isCurrentRecording(token) else { return }
 
                     // In production the resident model always carries real Speech
                     // objects. Only deterministic unit tests inject a stub whose
@@ -203,30 +230,42 @@ final class TranscriptionEngine: @unchecked Sendable {
                         onDownloadProgress(1.0)
                         return
                     }
-                    self.transcriber = transcriber
-                    self.analyzer = analyzer
-                    targetFormat = format
+                    let ownsSpeechState = self.setCurrentRecordingState(token) {
+                        self.transcriber = transcriber
+                        self.analyzer = analyzer
+                        targetFormat = format
+                    }
+                    guard ownsSpeechState else { return }
+                    guard self.isCurrentRecording(token) else { return }
                     onDownloadProgress(1.0)
                 } else {
                     // No resident model: perform the full setup path
                     // First check if installation is needed and install with progress callback
                     let installed = await modelClient.isInstalled(locale: locale)
+                    guard self.isCurrentRecording(token) else { return }
                     if !installed {
                         try await modelClient.install(locale: locale, onProgress: onDownloadProgress)
+                        guard self.isCurrentRecording(token) else { return }
                     } else {
+                        guard self.isCurrentRecording(token) else { return }
                         onDownloadProgress(1.0)
                     }
 
                     // Now prepare the model (transcriber, analyzer, format, reservation)
                     let prepared = try await modelClient.prepare(locale: locale)
+                    guard self.isCurrentRecording(token) else { return }
                     recordingModelIdentity = prepared.identity
-                    self.transcriber = prepared.transcriber
-                    self.analyzer = prepared.analyzer
-                    targetFormat = prepared.format
-                    reservedLocale = prepared.reservedLocale
+                    let ownsPreparedState = self.setCurrentRecordingState(token) {
+                        self.transcriber = prepared.transcriber
+                        self.analyzer = prepared.analyzer
+                        targetFormat = prepared.format
+                        reservedLocale = prepared.reservedLocale
+                    }
+                    guard ownsPreparedState else { return }
 
                     // Record the recording start with nil identity (no resident model used)
                     await modelClient.recordRecordingStart(locale: locale, preparedIdentity: nil)
+                    guard self.isCurrentRecording(token) else { return }
 
                     // See the resident-path comment above: only a test stub returns
                     // nil Speech objects here. Nothing further to drive in that case.
@@ -235,34 +274,39 @@ final class TranscriptionEngine: @unchecked Sendable {
                     }
                 }
 
-                if resultsModelIdentity != recordingModelIdentity {
-                    resultsTask?.cancel()
-                    resultsTask = nil
-                    resultsModelIdentity = recordingModelIdentity
+                let ownsResultState = self.setCurrentRecordingState(token) {
+                    if resultsModelIdentity != recordingModelIdentity {
+                        resultsTask?.cancel()
+                        resultsTask = nil
+                        resultsModelIdentity = recordingModelIdentity
+                    }
                 }
+                guard ownsResultState else { return }
 
                 let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
-                inputContinuation = continuation
-                if resultsTask == nil {
-                    guard let resultTranscriber = self.transcriber else { throw TranscriptionSetupError.noAudioFormat }
-                    resultsTask = Task { [weak self] in
-                        let results = resultTranscriber.results
-                        do {
-                            for try await result in results {
-                                guard let self else { return }
-                                let text = String(result.text.characters)
-                                if result.isFinal {
-                                    self.finalizeLine(text: text)
-                                } else {
-                                    self.bufferLock.withLock { self.pendingText = text }
-                                    self.onPendingTextChanged(text)
+                let ownsInputState = self.setCurrentRecordingState(token) {
+                    inputContinuation = continuation
+                    if resultsTask == nil, let resultTranscriber = self.transcriber {
+                        resultsTask = Task { [weak self] in
+                            let results = resultTranscriber.results
+                            do {
+                                for try await result in results {
+                                    guard let self else { return }
+                                    let text = String(result.text.characters)
+                                    if result.isFinal {
+                                        self.finalizeLine(text: text)
+                                    } else {
+                                        self.bufferLock.withLock { self.pendingText = text }
+                                        self.onPendingTextChanged(text)
+                                    }
                                 }
+                            } catch {
+                                // Results stream ended (or errored) — nothing further to consume.
                             }
-                        } catch {
-                            // Results stream ended (or errored) — nothing further to consume.
                         }
                     }
                 }
+                guard ownsInputState else { return }
 
                 // Guaranteed non-nil here: both branches above return early when
                 // their Speech objects are nil (stub-only test scenarios). Throwing
@@ -270,14 +314,19 @@ final class TranscriptionEngine: @unchecked Sendable {
                 // ever violated by a future change, the existing catch block still
                 // reports the failure via `onSetupFailed` instead of leaving the
                 // results pipeline waiting on an analyzer that never starts.
-                guard let analyzer = self.analyzer else { throw TranscriptionSetupError.noAudioFormat }
+                guard let analyzer = bufferLock.withLock({
+                    guard recordingToken == token else { return Optional<SpeechAnalyzer>.none }
+                    return self.analyzer
+                }) else { return }
                 try await analyzer.start(inputSequence: stream)
-                await self.mixLoop()
+                guard self.isCurrentRecording(token) else { return }
+                await self.mixLoop(token: token)
             } catch {
                 // Transcription unavailable (locale/permission/download failure) —
                 // recording continues audio-only. Report completion so the UI
                 // doesn't show a stuck progress bar, and surface the reason so
                 // the failure isn't silent.
+                guard self.isCurrentRecording(token) else { return }
                 onDownloadProgress(1.0)
                 onSetupFailed(Self.setupFailureMessage(for: error))
             }
@@ -303,22 +352,55 @@ final class TranscriptionEngine: @unchecked Sendable {
         }
     }
 
-    private func mixLoop() async {
+    private func mixLoop(token: UUID) async {
         while !Task.isCancelled {
+            guard isCurrentRecording(token) else { return }
             try? await Task.sleep(nanoseconds: UInt64(Self.mixInterval * 1_000_000_000))
-            guard let format = targetFormat else { continue }
+            guard isCurrentRecording(token) else { return }
+            await mixLoopCheckpoint?(token)
 
-            let chunk = bufferLock.withLock { () -> [Float] in
+            guard let snapshot = bufferLock.withLock({ () -> (AVAudioFormat, [Float])? in
+                guard recordingToken == token else { return nil }
+                guard let format = targetFormat else { return nil }
                 let chunk = LiveMixer.sum(systemAccumulator, micAccumulator)
                 systemAccumulator = []
                 micAccumulator = []
-                return chunk
+                return (format, chunk)
+            }) else {
+                await mixLoopDidSnapshot?(token, 0)
+                return
             }
+            let (format, chunk) = snapshot
+            await mixLoopDidSnapshot?(token, chunk.count)
 
             guard !chunk.isEmpty, let buffer = Self.makeBuffer(samples: chunk, format: format) else { continue }
-            inputContinuation?.yield(AnalyzerInput(buffer: buffer))
+            bufferLock.withLock {
+                guard recordingToken == token else { return }
+                inputContinuation?.yield(AnalyzerInput(buffer: buffer))
+            }
         }
     }
+
+    private func isCurrentRecording(_ token: UUID) -> Bool {
+        bufferLock.withLock { recordingToken == token }
+    }
+
+    private func setCurrentRecordingState(_ token: UUID, _ body: () -> Void = {}) -> Bool {
+        bufferLock.withLock {
+            guard recordingToken == token else { return false }
+            body()
+            return true
+        }
+    }
+
+    #if DEBUG
+    func configureMixingForTesting(format: AVAudioFormat, continuation: AsyncStream<AnalyzerInput>.Continuation) {
+        bufferLock.withLock {
+            targetFormat = format
+            inputContinuation = continuation
+        }
+    }
+    #endif
 
     private static func setupFailureMessage(for error: Error) -> String {
         switch error {
@@ -385,8 +467,11 @@ final class TranscriptionEngine: @unchecked Sendable {
     func stop() -> [TranscriptLine] {
         feedTask?.cancel()
         feedTask = nil
-        inputContinuation?.finish()
-        inputContinuation = nil
+        bufferLock.withLock {
+            recordingToken = UUID()
+            inputContinuation?.finish()
+            inputContinuation = nil
+        }
 
         let stillPending = bufferLock.withLock { pendingText }
         if !stillPending.isEmpty {

@@ -1,4 +1,6 @@
 import XCTest
+import AVFoundation
+import Speech
 @testable import AudioRecorder
 
 // MARK: - Test Harness
@@ -19,6 +21,36 @@ final class TranscriptionModelPreloadTests: XCTestCase {
         try await waitFor(harness.probe) { if case .preloadRequested("en-US") = $0 { return true }; return false }
         let preloadLocales = await harness.probe.preloadRequestLocales()
         XCTAssertEqual(preloadLocales, ["en-US"])
+    }
+
+    func testStaleMixLoopCannotDrainNewRecordingAccumulator() async throws {
+        let gate = MixLoopGate()
+        let engine = makeEngine(
+            client: StubTranscriptionModelClient(installed: []),
+            feedTaskOverride: { _, runMixLoop in await runMixLoop() },
+            mixLoopCheckpoint: { token in await gate.pause(token) },
+            mixLoopDidSnapshot: { token, sampleCount in await gate.recordSnapshot(token, sampleCount: sampleCount) }
+        )
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let (_, oldContinuation) = AsyncStream<AnalyzerInput>.makeStream()
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        engine.configureMixingForTesting(format: format, continuation: oldContinuation)
+        let staleToken = await gate.waitForPausedToken()
+
+        _ = engine.stop()
+
+        let (_, newContinuation) = AsyncStream<AnalyzerInput>.makeStream()
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        engine.configureMixingForTesting(format: format, continuation: newContinuation)
+        let newToken = await gate.waitForPausedToken()
+        engine.ingest(buffer: makeTestBuffer(format: format), format: format, isSystem: false)
+
+        await gate.release(staleToken)
+        _ = await gate.waitForSnapshot(staleToken)
+        await gate.release(newToken)
+
+        let newSampleCount = await gate.waitForSnapshot(newToken)
+        XCTAssertEqual(newSampleCount, 4)
     }
 
     func testSuccessfulExplicitDownloadStartsPreloadImmediately() async throws {
@@ -626,13 +658,29 @@ func makeInjectedSession(engine: TranscriptionEngine, selectedID: String) -> Rec
 // MARK: - Test Helpers
 
 @MainActor
-private func makeEngine(client: any TranscriptionModelClient) -> TranscriptionEngine {
+private func makeEngine(
+    client: any TranscriptionModelClient,
+    feedTaskOverride: (@Sendable (UUID, @escaping @Sendable () async -> Void) async -> Void)? = nil,
+    mixLoopCheckpoint: (@Sendable (UUID) async -> Void)? = nil,
+    mixLoopDidSnapshot: (@Sendable (UUID, Int) async -> Void)? = nil
+) -> TranscriptionEngine {
     TranscriptionEngine(
         modelClient: client,
         onLineFinalized: { _ in },
         onPendingTextChanged: { _ in },
-        onSetupFailed: { _ in }
+        onSetupFailed: { _ in },
+        feedTaskOverride: feedTaskOverride,
+        mixLoopCheckpoint: mixLoopCheckpoint,
+        mixLoopDidSnapshot: mixLoopDidSnapshot
     )
+}
+
+@MainActor
+private func makeTestBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer {
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)!
+    buffer.frameLength = 4
+    buffer.floatChannelData![0].update(from: [Float](repeating: 0.25, count: 4), count: 4)
+    return buffer
 }
 
 @MainActor
@@ -731,6 +779,52 @@ enum PreloadCountKind: Sendable {
 
 private typealias EventWaiter = (predicate: (PreloadTestEvent) -> Bool, continuation: CheckedContinuation<Void, Never>)
 private typealias CountWaiter = (kind: PreloadCountKind, count: Int, continuation: CheckedContinuation<Void, Never>)
+
+private actor MixLoopGate {
+    private var pausedTokens: [UUID] = []
+    private var pauseWaiters: [CheckedContinuation<UUID, Never>] = []
+    private var releaseWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var snapshotCounts: [UUID: Int] = [:]
+    private var snapshotWaiters: [UUID: [CheckedContinuation<Int, Never>]] = [:]
+
+    func pause(_ token: UUID) async {
+        if let waiter = pauseWaiters.first {
+            pauseWaiters.removeFirst()
+            waiter.resume(returning: token)
+        } else {
+            pausedTokens.append(token)
+        }
+        await withCheckedContinuation { continuation in
+            releaseWaiters[token] = continuation
+        }
+    }
+
+    func waitForPausedToken() async -> UUID {
+        if !pausedTokens.isEmpty {
+            return pausedTokens.removeFirst()
+        }
+        return await withCheckedContinuation { continuation in
+            pauseWaiters.append(continuation)
+        }
+    }
+
+    func release(_ token: UUID) {
+        releaseWaiters.removeValue(forKey: token)?.resume()
+    }
+
+    func recordSnapshot(_ token: UUID, sampleCount: Int) {
+        snapshotCounts[token] = sampleCount
+        let waiters = snapshotWaiters.removeValue(forKey: token) ?? []
+        waiters.forEach { $0.resume(returning: sampleCount) }
+    }
+
+    func waitForSnapshot(_ token: UUID) async -> Int {
+        if let sampleCount = snapshotCounts[token] { return sampleCount }
+        return await withCheckedContinuation { continuation in
+            snapshotWaiters[token, default: []].append(continuation)
+        }
+    }
+}
 
 actor PreloadTestProbe {
     private(set) var events: [PreloadTestEvent] = []
