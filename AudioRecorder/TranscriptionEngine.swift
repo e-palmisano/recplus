@@ -172,10 +172,18 @@ final class TranscriptionEngine: @unchecked Sendable {
                     throw TranscriptionSetupError.localeNotSupported
                 }
 
-                // Check if we have a resident prepared model for this locale
-                if let resident = preparedModel, resident.locale == locale {
+                // Check if we have a resident prepared model for this locale.
+                // Locked: `preparedModel` is also read/written by `_preload`
+                // from its own unstructured Task, so the check-and-capture
+                // must be atomic with respect to that — an unguarded read
+                // here could race with a concurrent publish/clear.
+                let resident: PreparedTranscriptionModel? = preloadStateLock.withLock {
+                    guard let model = preparedModel, model.locale == locale else { return nil }
+                    activeRecordingPreparedModel = model
+                    return model
+                }
+                if let resident {
                     // We have a resident model - reuse its identity and reservation
-                    activeRecordingPreparedModel = resident
                     reservedLocale = resident.reservedLocale
 
                     // Record the recording start with the prepared identity (shows we reused)
@@ -375,14 +383,19 @@ final class TranscriptionEngine: @unchecked Sendable {
         let capturedAnalyzer = analyzer
         let capturedResultsTask = resultsTask
         let capturedLocale = reservedLocale
-        let usedPreparedModel = activeRecordingPreparedModel
+        // Locked: `activeRecordingPreparedModel` is set by `start()` under
+        // the same lock; capture-and-clear here must be atomic with that.
+        let usedPreparedModel: PreparedTranscriptionModel? = preloadStateLock.withLock {
+            let model = activeRecordingPreparedModel
+            activeRecordingPreparedModel = nil
+            return model
+        }
 
         // Clear per-recording state but only clear reservedLocale if it's
         // not the resident model's reserved locale
         analyzer = nil
         transcriber = nil
         resultsTask = nil
-        activeRecordingPreparedModel = nil
 
         // Only clear reservedLocale if this recording didn't use the
         // resident prepared model (which manages its own reservation)
@@ -581,7 +594,7 @@ final class TranscriptionEngine: @unchecked Sendable {
 
     #if DEBUG
     var preparedLocaleForTesting: Locale? { preloadStateLock.withLock { preparedModel?.locale } }
-    var activePreparedIdentityForTesting: UUID? { activeRecordingPreparedModel?.identity }
+    var activePreparedIdentityForTesting: UUID? { preloadStateLock.withLock { activeRecordingPreparedModel?.identity } }
     var inFlightPreloadLocaleForTesting: String? { preloadStateLock.withLock { preloadMarker?.localeIdentifier } }
     var hasInFlightPreloadForTesting: Bool { preloadStateLock.withLock { preloadMarker != nil } }
     #endif
