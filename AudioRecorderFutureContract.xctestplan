@@ -1,0 +1,22 @@
+{
+  "configurations" : [
+    {
+      "id" : "B1C2D3E4-F5A6-4789-0123-456789012345",
+      "name" : "Debug",
+      "options" : {
+      }
+    }
+  ],
+  "defaultOptions" : {
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:AudioRecorder.xcodeproj",
+        "identifier" : "04DAE4F37E84BFEBFD816D8F",
+        "name" : "AudioRecorderTests"
+      }
+    }
+  ],
+  "version" : 1
+}

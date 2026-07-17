@@ -6,8 +6,12 @@ docs/superpowers/
 *.xcuserstate
 build/
 DerivedData/
+DerivedDataClean/
+DerivedDataFocused/
+DerivedDataFull/
 output/
 xcuserdata/
 .superpowers/
 opencode.json
 .worktrees/
+.claude/

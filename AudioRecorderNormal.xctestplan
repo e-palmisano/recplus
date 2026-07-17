@@ -1,0 +1,26 @@
+{
+  "configurations" : [
+    {
+      "id" : "A1B2C3D4-E5F6-47A8-9012-345678901234",
+      "name" : "Debug",
+      "options" : {
+      }
+    }
+  ],
+  "defaultOptions" : {
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:AudioRecorder.xcodeproj",
+        "identifier" : "04DAE4F37E84BFEBFD816D8F",
+        "name" : "AudioRecorderTests"
+      },
+      "skippedTests" : [
+        "TranscriptionLifecyclePlannedRedTests/testLifecycle_StartFromIdlePreparesAndRecordsThenStopFinalizesToResident",
+        "TranscriptionLifecyclePlannedRedTests/testLateAnalyzerCallbackAfterStopCannotPublishIntoNextRecording"
+      ]
+    }
+  ],
+  "version" : 1
+}

@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
    LastUpgradeVersion = "1430"
-   version = "1.7">
+   version = "1.8">
    <BuildAction
       parallelizeBuildables = "YES"
-      buildImplicitDependencies = "YES"
-      runPostActionsOnFailure = "NO">
+      buildImplicitDependencies = "YES">
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
@@ -16,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A39B92F6527E2764861F616F"
-               BuildableName = "AudioRecorder.app"
+               BuildableName = "Rec+.app"
                BlueprintName = "AudioRecorder"
                ReferencedContainer = "container:AudioRecorder.xcodeproj">
             </BuildableReference>
@@ -41,17 +40,22 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES"
-      onlyGenerateCoverageForSpecifiedTargets = "NO">
+      shouldUseLaunchSchemeArgsEnv = "YES">
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A39B92F6527E2764861F616F"
-            BuildableName = "AudioRecorder.app"
+            BuildableName = "Rec+.app"
             BlueprintName = "AudioRecorder"
             ReferencedContainer = "container:AudioRecorder.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
+      <TestPlans>
+         <TestPlanReference
+            reference = "container:AudioRecorderNormal.xctestplan"
+            default = "YES">
+         </TestPlanReference>
+      </TestPlans>
       <Testables>
          <TestableReference
             skipped = "NO"
@@ -63,10 +67,18 @@
                BlueprintName = "AudioRecorderTests"
                ReferencedContainer = "container:AudioRecorder.xcodeproj">
             </BuildableReference>
+            <Test
+               Identifier = "TranscriptionLifecyclePlannedRedTests/testLifecycle_StartFromIdlePreparesAndRecordsThenStopFinalizesToResident()"
+               Name = "testLifecycle_StartFromIdlePreparesAndRecordsThenStopFinalizesToResident()"
+               skipped = "YES">
+            </Test>
+            <Test
+               Identifier = "TranscriptionLifecyclePlannedRedTests/testLateAnalyzerCallbackAfterStopCannotPublishIntoNextRecording()"
+               Name = "testLateAnalyzerCallbackAfterStopCannotPublishIntoNextRecording()"
+               skipped = "YES">
+            </Test>
          </TestableReference>
       </Testables>
-      <CommandLineArguments>
-      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
@@ -83,13 +95,11 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A39B92F6527E2764861F616F"
-            BuildableName = "AudioRecorder.app"
+            BuildableName = "Rec+.app"
             BlueprintName = "AudioRecorder"
             ReferencedContainer = "container:AudioRecorder.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <CommandLineArguments>
-      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -102,7 +112,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A39B92F6527E2764861F616F"
-            BuildableName = "AudioRecorder.app"
+            BuildableName = "Rec+.app"
             BlueprintName = "AudioRecorder"
             ReferencedContainer = "container:AudioRecorder.xcodeproj">
          </BuildableReference>
