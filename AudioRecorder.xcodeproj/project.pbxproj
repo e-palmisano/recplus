@@ -221,6 +221,7 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					A39B92F6527E2764861F616F = {
+						DevelopmentTeam = 5VF5BV7C9Q;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -326,6 +327,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1.0;
+				DEVELOPMENT_TEAM = 5VF5BV7C9Q;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AudioRecorder/Info.plist;
@@ -350,6 +352,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1.0;
+				DEVELOPMENT_TEAM = 5VF5BV7C9Q;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AudioRecorder/Info.plist;
