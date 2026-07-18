@@ -32,6 +32,7 @@ targets:
         CFBundleDisplayName: "Rec+"
         LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: ""
+        ITSAppUsesNonExemptEncryption: false
         LSUIElement: false
     entitlements:
       path: AudioRecorder/AudioRecorder.entitlements
