@@ -23,7 +23,18 @@ final class RecordingSession {
     private(set) var errorMessage: String?
     private(set) var lastRecordingURL: URL?
     var availableMics: [MicDevice] = []
-    var selectedMicID: AudioObjectID?
+    var selectedMicID: AudioObjectID? {
+        didSet {
+            guard isRecording, let selectedMicID, selectedMicID != oldValue else { return }
+            do {
+                try micRecorder.switchDevice(to: selectedMicID)
+            } catch {
+                errorMessage = "Couldn't switch microphone: \(error.localizedDescription)"
+                // The recorder fell back to the previous device; show that.
+                self.selectedMicID = oldValue
+            }
+        }
+    }
     private(set) var availableTranscriptionLocales: [Locale] = []
     var selectedTranscriptionLocaleID: String {
         didSet {
@@ -272,6 +283,9 @@ final class RecordingSession {
             lastMicLevelAt = now
             let level = AudioLevelMeter.rmsLevel(of: buffer)
             Task { @MainActor in self?.levels.mic = level }
+        }
+        micRecorder.onFailure = { [weak self] message in
+            Task { @MainActor in self?.errorMessage = message }
         }
         systemRecorder.onBuffer = { [weak self] buffer, format in
             self?.transcriptionEngine.ingest(buffer: buffer, format: format, isSystem: true)

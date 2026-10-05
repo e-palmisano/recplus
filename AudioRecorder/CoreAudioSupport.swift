@@ -61,10 +61,12 @@ extension AudioObjectID {
 // MARK: - Generic property access
 
 extension AudioObjectID {
-    func readArray<T>(_ selector: AudioObjectPropertySelector, defaultValue: T) throws -> [T] {
+    func readArray<T>(_ selector: AudioObjectPropertySelector,
+                      scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+                      defaultValue: T) throws -> [T] {
         var address = AudioObjectPropertyAddress(
             mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
 

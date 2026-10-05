@@ -79,7 +79,6 @@ struct ContentView: View {
                         Text(mic.name).tag(Optional(mic.id))
                     }
                 }
-                .disabled(session.isRecording)
                 .help("Input microphone")
             }
 
