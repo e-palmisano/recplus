@@ -62,6 +62,11 @@ final class RecordingSession {
     var desiredRecordingName: String?
     private var systemStartedAt: Date?
     private var micStartedAt: Date?
+    /// Mix-downs of stopped recordings, chained: a quick stop→start→stop never
+    /// runs two mixes at once (each holds the whole recording in RAM), and
+    /// quitting can await all of them before the process exits.
+    @ObservationIgnored
+    private var finalizeTask: Task<Void, Never>?
 
     // Selection/preload state
     private var selectionGeneration = 0
@@ -368,15 +373,19 @@ final class RecordingSession {
               let micStartedAt else { return }
 
         let sessionsDir = Self.sessionsDirectory()
-        let finalBaseName = RecordingNaming.resolveFinalBaseName(
-            desiredName: desiredRecordingName,
-            fallback: baseName,
-            directory: sessionsDir
-        )
-        let outputURL = sessionsDir.appendingPathComponent("\(finalBaseName).m4a")
-        let transcriptURL = sessionsDir.appendingPathComponent("\(finalBaseName).txt")
+        let desiredName = desiredRecordingName
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        enqueueFinalization { [weak self] in
+            // Resolved here, not in stop(): the .m4a only appears once its mix
+            // finishes, and mixes run one after another — so this sees every
+            // earlier recording's file and two same-named stops can't collide.
+            let finalBaseName = RecordingNaming.resolveFinalBaseName(
+                desiredName: desiredName,
+                fallback: baseName,
+                directory: sessionsDir
+            )
+            let outputURL = sessionsDir.appendingPathComponent("\(finalBaseName).m4a")
+            let transcriptURL = sessionsDir.appendingPathComponent("\(finalBaseName).txt")
             do {
                 try AudioMixer.mix(
                     systemURL: systemURL,
@@ -396,6 +405,19 @@ final class RecordingSession {
                 try? TranscriptWriter.text(for: finalLines).write(to: transcriptURL, atomically: true, encoding: .utf8)
             }
         }
+    }
+
+    func enqueueFinalization(_ work: @escaping @Sendable () async -> Void) {
+        let previous = finalizeTask
+        finalizeTask = Task.detached(priority: .userInitiated) {
+            await previous?.value
+            await work()
+        }
+    }
+
+    /// Returns once every queued mix-down has finished (immediately if none).
+    func waitForPendingFinalization() async {
+        await finalizeTask?.value
     }
 
     private static func sessionsDirectory() -> URL {

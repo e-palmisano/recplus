@@ -113,9 +113,16 @@ enum AudioMixer {
             AVNumberOfChannelsKey: canonicalFormat.channelCount,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
         ]
+        // Encode into a same-volume scratch dir and move into place only once
+        // closed: an .m4a gets its `moov` index on close, so a crash or kill
+        // mid-encode must never leave a truncated file under the final name.
+        let scratchDir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: outputURL, create: true)
+        defer { try? FileManager.default.removeItem(at: scratchDir) }
+        let scratchURL = scratchDir.appendingPathComponent(outputURL.lastPathComponent)
+
         let outputFile: AVAudioFile
         do {
-            outputFile = try AVAudioFile(forWriting: outputURL, settings: aacSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
+            outputFile = try AVAudioFile(forWriting: scratchURL, settings: aacSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
         } catch {
             throw "Failed to create AAC output file at \(outputURL.lastPathComponent): \(error.localizedDescription)"
         }
@@ -124,5 +131,7 @@ enum AudioMixer {
         } catch {
             throw "Failed to write mixed audio to \(outputURL.lastPathComponent): \(error.localizedDescription)"
         }
+        outputFile.close()
+        try FileManager.default.moveItem(at: scratchURL, to: outputURL)
     }
 }
