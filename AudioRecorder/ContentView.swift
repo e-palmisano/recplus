@@ -70,7 +70,11 @@ struct ContentView: View {
             }
 
             ToolbarItem {
-                Picker("Microphone", selection: $session.selectedMicID) {
+                CenteredMenuPicker(
+                    title: "Microphone",
+                    selectedLabel: session.availableMics.first { $0.id == session.selectedMicID }?.name ?? "Microphone",
+                    selection: $session.selectedMicID
+                ) {
                     ForEach(session.availableMics) { mic in
                         Text(mic.name).tag(Optional(mic.id))
                     }
@@ -80,7 +84,11 @@ struct ContentView: View {
             }
 
             ToolbarItem {
-                Picker("Language", selection: $session.selectedTranscriptionLocaleID) {
+                CenteredMenuPicker(
+                    title: "Language",
+                    selectedLabel: RecordingSession.localeDisplayName(Locale(identifier: session.selectedTranscriptionLocaleID)),
+                    selection: $session.selectedTranscriptionLocaleID
+                ) {
                     ForEach(session.availableTranscriptionLocales, id: \.identifier) { locale in
                         Text(RecordingSession.localeDisplayName(locale)).tag(locale.identifier)
                     }
@@ -192,6 +200,29 @@ struct ContentView: View {
         }
         selectionID = nil
         store.refresh()
+    }
+}
+
+/// Toolbar picker with the selected value centered in the control: a plain
+/// menu `Picker` renders as an NSPopUpButton, whose title is always
+/// left-aligned. The inline `Picker` keeps the checkmarked menu items.
+private struct CenteredMenuPicker<Selection: Hashable, Content: View>: View {
+    let title: String
+    let selectedLabel: String
+    @Binding var selection: Selection
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        Menu {
+            Picker(title, selection: $selection, content: content)
+                .pickerStyle(.inline)
+                .labelsHidden()
+        } label: {
+            Text(selectedLabel)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(minWidth: 160)
+        }
     }
 }
 
