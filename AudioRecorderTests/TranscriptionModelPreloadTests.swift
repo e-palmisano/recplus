@@ -32,16 +32,19 @@ final class TranscriptionModelPreloadTests: XCTestCase {
             mixLoopDidSnapshot: { token, sampleCount in await gate.recordSnapshot(token, sampleCount: sampleCount) }
         )
         let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        // Int16, like SpeechAnalyzer.bestAvailableAudioFormat returns: since macOS 27
+        // AnalyzerInput(buffer:) traps on Float32 buffers.
+        let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
         let (_, oldContinuation) = AsyncStream<AnalyzerInput>.makeStream()
         engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
-        engine.configureMixingForTesting(format: format, continuation: oldContinuation)
+        engine.configureMixingForTesting(format: targetFormat, continuation: oldContinuation)
         let staleToken = await gate.waitForPausedToken()
 
         _ = engine.stop()
 
         let (_, newContinuation) = AsyncStream<AnalyzerInput>.makeStream()
         engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
-        engine.configureMixingForTesting(format: format, continuation: newContinuation)
+        engine.configureMixingForTesting(format: targetFormat, continuation: newContinuation)
         let newToken = await gate.waitForPausedToken()
         engine.ingest(buffer: makeTestBuffer(format: format), format: format, isSystem: false)
 
@@ -51,6 +54,33 @@ final class TranscriptionModelPreloadTests: XCTestCase {
 
         let newSampleCount = await gate.waitForSnapshot(newToken)
         XCTAssertEqual(newSampleCount, 4)
+    }
+
+    func testFloat32TargetFormatIsSkippedInsteadOfTrappingAnalyzerInput() async throws {
+        let gate = MixLoopGate()
+        let engine = makeEngine(
+            client: StubTranscriptionModelClient(installed: []),
+            feedTaskOverride: { _, runMixLoop in await runMixLoop() },
+            mixLoopCheckpoint: { token in await gate.pause(token) },
+            mixLoopDidSnapshot: { token, sampleCount in await gate.recordSnapshot(token, sampleCount: sampleCount) }
+        )
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let (_, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        engine.start(preferredLocale: Locale(identifier: "en-US"), onDownloadProgress: { _ in })
+        engine.configureMixingForTesting(format: format, continuation: continuation)
+        let token = await gate.waitForPausedToken()
+        engine.ingest(buffer: makeTestBuffer(format: format), format: format, isSystem: false)
+
+        await gate.release(token)
+        let sampleCount = await gate.waitForSnapshot(token)
+        // Reaching the next checkpoint proves the chunk went through makeBuffer
+        // without AnalyzerInput(buffer:) trapping the process.
+        let nextToken = await gate.waitForPausedToken()
+
+        XCTAssertEqual(sampleCount, 4)
+        XCTAssertEqual(nextToken, token)
+        _ = engine.stop()
+        await gate.release(token)
     }
 
     func testSuccessfulExplicitDownloadStartsPreloadImmediately() async throws {

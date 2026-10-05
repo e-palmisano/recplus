@@ -424,13 +424,10 @@ final class TranscriptionEngine: @unchecked Sendable {
         }
         buffer.frameLength = buffer.frameCapacity
 
+        // Int16 only: since macOS 27, AnalyzerInput(buffer:) traps (SIGTRAP, no
+        // error) on Float32 buffers, so any other target format is skipped here
+        // rather than crashing the app mid-recording.
         switch format.commonFormat {
-        case .pcmFormatFloat32:
-            guard let channelData = buffer.floatChannelData else { return nil }
-            samples.withUnsafeBufferPointer { pointer in
-                guard let base = pointer.baseAddress else { return }
-                channelData[0].update(from: base, count: samples.count)
-            }
         case .pcmFormatInt16:
             guard let channelData = buffer.int16ChannelData else { return nil }
             for index in samples.indices {
